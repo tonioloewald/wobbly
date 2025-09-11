@@ -1,5 +1,3 @@
-// src/async-array-operations.ts
-
 /**
  * A generic type for functions that can be executed in a Web Worker.
  * The function must be serializable.
