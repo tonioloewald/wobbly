@@ -9,10 +9,6 @@ beforeAll(() => {
   asyncArray = new AsyncArray();
 });
 
-afterAll(() => {
-  asyncArray.terminateWorkers();
-});
-
 test('map should perform a heavy operation and return the correct result', async () => {
   // A computationally heavy mapping function
   const squareRootFn = (num: number) => Math.sqrt(num);
@@ -45,20 +41,47 @@ test('filter should perform a heavy operation and return the correct filtered ar
 
 test('filter should perform a heavy operation and return the correct filtered array', async () => {
   // A computationally heavy filtering function
-  function isPrimeGivenContext (num: number) {
-    num = num + this.offset
+  const isPrimeFn = (num: number) => {
     for (let i = 2, s = Math.sqrt(num); i <= s; i++) {
       if (num % i === 0) return false;
     }
     return num > 1;
   };
   
-  const expectedResult = largeArray.filter(isPrimeGivenContext.bind({offset: 3}));
-  asyncArray.withContext({offset: 3})
+  console.time('find primes serially')
+  const expectedResult = largeArray.filter(isPrimeFn);
+  console.timeEnd('find primes serially')
   
-  const result = await asyncArray.filter(largeArray, isPrimeGivenContext);
+  console.time('find primes in parallel')
+  const result = await asyncArray.filter(largeArray, isPrimeFn);
+  console.timeEnd('find primes in parallel')
   
   expect(result).toEqual(expectedResult);
+});
+
+test('filter should perform operations in parallel', async () => {
+  // A computationally heavy filtering function
+  const isPrimeFn = (num: number) => {
+    for (let i = 2, s = Math.sqrt(num); i <= s; i++) {
+      if (num % i === 0) return false;
+    }
+    return num > 1;
+  };
+  
+  const isPerfectSquare = (num: number) => Math.sqrt(num) % 0 === 0
+  
+  const primes = largeArray.filter(isPrimeFn);
+  const squares = largeArray.filter(isPerfectSquare);
+  
+  console.time('find primes and squares in parallel')
+  const [pPrimes, pSquares] = await Promise.all([
+    asyncArray.filter(largeArray, isPrimeFn),
+    asyncArray.filter(largeArray, isPerfectSquare)
+  ])
+  console.timeEnd('find primes and squares in parallel')
+  
+  expect(pPrimes.length).toEqual(primes.length);
+  expect(pSquares.length).toEqual(squares.length);
 });
 
 test('forEach should perform a heavy operation without returning a value', async () => {
