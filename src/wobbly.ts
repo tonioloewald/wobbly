@@ -41,6 +41,13 @@ export class AsyncArray<T> {
     this.progressReportInterval = progressReportInterval;
     this.initializeWorkers();
   }
+  
+  private serializedContext: string = 'null'
+  
+  public withContext(context: any): AsyncArray<T> {
+    this.serializedContext = JSON.stringify(context)
+    return this
+  }
 
   /**
    * Initializes a pool of Web Workers.
@@ -48,8 +55,12 @@ export class AsyncArray<T> {
   private initializeWorkers(): void {
     const workerScript = `
       self.onmessage = (event) => {
-        const { type, data, fn, workerIndex } = event.data;
-        const operationFn = new Function('return ' + fn)();
+        const { type, data, fn, workerIndex, context } = event.data;
+        const contextObj = JSON.parse(context);
+        let operationFn = new Function('return ' + fn)();
+        if (contextObj !== null) {
+          operationFn = operationFn.bind(contextObj)
+        }
         
         try {
           let result;
@@ -168,6 +179,7 @@ export class AsyncArray<T> {
           data: chunk,
           fn: fn.toString(), // Serialize the function to a string
           workerIndex: index,
+          context: this.serializedContext
         };
         worker.postMessage(message);
       });

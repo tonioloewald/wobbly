@@ -2,7 +2,7 @@ import { test, expect, beforeAll, afterAll } from 'bun:test';
 import { AsyncArray } from './wobbly';
 
 // We'll create a large array for testing performance-intensive operations
-const largeArray = Array.from({ length: 100000 }, (_, i) => i);
+const largeArray = Array.from({ length: 1e+7 }, (_, i) => i);
 let asyncArray: AsyncArray<number>;
 
 beforeAll(() => {
@@ -31,9 +31,32 @@ test('filter should perform a heavy operation and return the correct filtered ar
     }
     return num > 1;
   };
-  const expectedResult = largeArray.filter(isPrimeFn);
   
+  console.time('find primes serially')
+  const expectedResult = largeArray.filter(isPrimeFn);
+  console.timeEnd('find primes serially')
+  
+  console.time('find primes in parallel')
   const result = await asyncArray.filter(largeArray, isPrimeFn);
+  console.timeEnd('find primes in parallel')
+  
+  expect(result).toEqual(expectedResult);
+});
+
+test('filter should perform a heavy operation and return the correct filtered array', async () => {
+  // A computationally heavy filtering function
+  function isPrimeGivenContext (num: number) {
+    num = num + this.offset
+    for (let i = 2, s = Math.sqrt(num); i <= s; i++) {
+      if (num % i === 0) return false;
+    }
+    return num > 1;
+  };
+  
+  const expectedResult = largeArray.filter(isPrimeGivenContext.bind({offset: 3}));
+  asyncArray.withContext({offset: 3})
+  
+  const result = await asyncArray.filter(largeArray, isPrimeGivenContext);
   
   expect(result).toEqual(expectedResult);
 });
