@@ -90,6 +90,10 @@ export class AsyncArray<T> {
   
   private serializedContext: string = '{}'
   
+  /**
+   * Provides context for subsequent operations
+   * @param context A serializable context object to which the method will be bound in the workers
+   */
   public withContext(context: any): AsyncArray<T> {
     this.serializedContext = JSON.stringify(context)
     return this
