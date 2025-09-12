@@ -136,11 +136,12 @@ test('progress callback should be called with increasing values', async () => {
     progressReports.push(progress)
   }
 
-  const slowMapFn = (num: number) => {
+  function slowMapFn(num: number) {
     let result = num
-    for (let i = 0; i < 500; i++) {
-      result = Math.sqrt(result + i)
+    for (let i = 0; i < 10; i++) {
+      result += Math.sqrt(result + i)
     }
+    if (this.progress) this.progress()
     return result
   }
 

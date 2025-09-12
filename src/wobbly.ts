@@ -11,23 +11,23 @@ type WorkerOperation<T, U> = (
 const workerScript = `
   self.onmessage = (event) => {
     const { type, data, fn, workerIndex, context } = event.data;
-    const contextObj = JSON.parse(context);
-    const operationFn = (new Function('return ' + fn)()).bind(contextObj);
     
     try {
-      let result;
       const total = data.length;
       let processed = 0;
-      const reportInterval = Math.max(1, Math.floor(total / 10)); // Report progress at least 10 times
-
-      const processItem = (item) => {
+      const reportInterval = Math.max(1, Math.floor(total / 100)); // Report progress at least 10 times
+      const contextObj = JSON.parse(context);
+      
+      contextObj.progress = () => {
         processed++;
         if (processed % reportInterval === 0 || processed === total) {
           const progress = processed / total;
           self.postMessage({ type: 'progress', workerIndex, progress });
         }
-        return operationFn(item);
-      };
+      }
+      const processItem = (new Function('return ' + fn)()).bind(contextObj);
+      
+      let result;
 
       switch (type) {
         case 'map':
@@ -38,7 +38,7 @@ const workerScript = `
           break;
         case 'reduce':
           // Fix for double-counting: correctly use the first element as the accumulator
-          result = data.reduce(operationFn, undefined);
+          result = data.reduce(processItem, undefined);
           break;
         case 'forEach':
           data.forEach(processItem);
