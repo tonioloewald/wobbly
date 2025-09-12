@@ -2,7 +2,11 @@
  * A generic type for functions that can be executed in a Web Worker.
  * The function must be serializable.
  */
-type WorkerOperation<T, U> = (data: T[], fn: (item: T) => U, workerIndex: number) => U[] | U | void;
+type WorkerOperation<T, U> = (
+  data: T[],
+  fn: (item: T) => U,
+  workerIndex: number
+) => U[] | U | void
 
 const workerScript = `
   self.onmessage = (event) => {
@@ -49,29 +53,29 @@ const workerScript = `
       self.postMessage({ type: 'result', result: null, workerIndex });
     }
   };
-`;
+`
 
-const workerBlob = new Blob([workerScript], { type: 'application/javascript' });
-const WORKER_URL = URL.createObjectURL(workerBlob);
+const workerBlob = new Blob([workerScript], { type: 'application/javascript' })
+const WORKER_URL = URL.createObjectURL(workerBlob)
 
 /**
  * A type to represent the message sent from the main thread to the worker.
  */
 interface WorkerMessage<T, U> {
-  type: 'map' | 'forEach' | 'filter' | 'reduce';
-  data: T[];
-  fn: string; // The function to be executed, serialized as a string
-  workerIndex: number;
+  type: 'map' | 'forEach' | 'filter' | 'reduce'
+  data: T[]
+  fn: string // The function to be executed, serialized as a string
+  workerIndex: number
 }
 
 /**
  * A type for the message received from the worker.
  */
 interface WorkerResult<U> {
-  type: 'result' | 'progress';
-  result?: U[] | U | void;
-  workerIndex: number;
-  progress?: number;
+  type: 'result' | 'progress'
+  result?: U[] | U | void
+  workerIndex: number
+  progress?: number
 }
 
 /**
@@ -79,18 +83,22 @@ interface WorkerResult<U> {
  * It creates a pool of workers and distributes tasks among them.
  */
 export class AsyncArray<T> {
-  private readonly maxWorkers: number;
-  private workerUrl: string | null = null;
-  private progressReportInterval: number;
+  private readonly maxWorkers: number
+  private workerUrl: string | null = null
+  private progressReportInterval: number
   private array: T[]
-  constructor(array: T[], maxWorkers: number = navigator.hardwareConcurrency || 4, progressReportInterval: number = 100) {
-    this.array = array;
-    this.maxWorkers = maxWorkers;
-    this.progressReportInterval = progressReportInterval;
+  constructor(
+    array: T[],
+    maxWorkers: number = navigator.hardwareConcurrency || 4,
+    progressReportInterval: number = 100
+  ) {
+    this.array = array
+    this.maxWorkers = maxWorkers
+    this.progressReportInterval = progressReportInterval
   }
-  
+
   private serializedContext: string = '{}'
-  
+
   /**
    * Provides context for subsequent operations
    * @param context A serializable context object to which the method will be bound in the workers
@@ -104,13 +112,12 @@ export class AsyncArray<T> {
    * Initializes a pool of Web Workers.
    */
   private initializeWorkers(): Worker[] {
-    const workers: Worker[] = [];
-    
+    const workers: Worker[] = []
 
     for (let i = 0; i < this.maxWorkers; i++) {
-      workers.push(new Worker(WORKER_URL));
+      workers.push(new Worker(WORKER_URL))
     }
-    
+
     return workers
   }
 
@@ -127,74 +134,85 @@ export class AsyncArray<T> {
     progressCallback?: (progress: number) => void
   ): Promise<U[] | U | void> {
     const workers = this.initializeWorkers()
+
+    const cleanup = (e?: Error) => {
+      workers.forEach((worker) => worker.terminate())
+      if (e) reject(e)
+    }
+
     return new Promise((resolve, reject) => {
       if (this.array.length === 0) {
-        if (progressCallback) progressCallback(1);
-        resolve(type === 'map' || type === 'filter' ? [] : undefined);
-        return;
+        if (progressCallback) progressCallback(1)
+        resolve(type === 'map' || type === 'filter' ? [] : undefined)
+        return
       }
-      
-      const cleanup = (e?: Error) => {
-        workers.forEach(worker => worker.terminate());
-        if (e) reject(e); // Reject the promise on error
-      };
 
-      const chunkSize = Math.ceil(this.array.length / this.maxWorkers);
-      let results: (U[] | U | void)[] = new Array(this.maxWorkers);
-      let receivedCount = 0;
-      let lastReportedProgress = 0;
-      let workerProgress: number[] = new Array(this.maxWorkers).fill(0);
+      const chunkSize = Math.ceil(this.array.length / this.maxWorkers)
+      let results: (U[] | U | void)[] = new Array(this.maxWorkers)
+      let receivedCount = 0
+      let lastReportedProgress = 0
+      let workerProgress: number[] = new Array(this.maxWorkers).fill(0)
 
       const onMessage = (event: MessageEvent<WorkerResult<U>>) => {
-        const { type: messageType, result, workerIndex, progress } = event.data;
-        
+        const { type: messageType, result, workerIndex, progress } = event.data
+
         if (messageType === 'progress' && progressCallback) {
-          workerProgress[workerIndex] = progress || 0;
-          const totalProgress = workerProgress.reduce((sum, p) => sum + p, 0) / this.maxWorkers;
-          if (totalProgress - lastReportedProgress >= 0.01 || totalProgress === 1) {
-            progressCallback(totalProgress);
-            lastReportedProgress = totalProgress;
+          workerProgress[workerIndex] = progress || 0
+          const totalProgress =
+            workerProgress.reduce((sum, p) => sum + p, 0) / this.maxWorkers
+          if (
+            totalProgress - lastReportedProgress >= 0.01 ||
+            totalProgress === 1
+          ) {
+            progressCallback(totalProgress)
+            lastReportedProgress = totalProgress
           }
         } else if (messageType === 'result') {
-          results[workerIndex] = result;
-          receivedCount++;
+          results[workerIndex] = result
+          receivedCount++
 
           if (receivedCount === this.maxWorkers) {
-            cleanup();
+            cleanup()
 
-            // Combine results based on operation type
             if (type === 'map' || type === 'filter') {
-              resolve((results as U[][]).flat());
+              resolve((results as U[][]).flat())
             } else if (type === 'reduce') {
-              // Re-reduce the results from each worker
-              const context = Object.assign(JSON.parse(this.serializedContext), {final: true})
-              const reducer = fn.bind(context)
-              const finalResult = (results as U[]).reduce(reducer as any, undefined);
-              resolve(finalResult);
+              // The final reduce step on the main thread
+              const finalContext = Object.assign(
+                JSON.parse(this.serializedContext),
+                { final: true }
+              )
+              const finalReducer = fn.bind(finalContext)
+
+              const finalResult = (results as U[]).reduce(finalReducer as any)
+              resolve(finalResult)
             } else {
-              resolve();
+              resolve()
             }
           }
         }
-      };
+      }
 
       workers.forEach((worker, index) => {
-        worker.addEventListener('message', onMessage);
+        worker.addEventListener('message', onMessage)
         worker.addEventListener('error', (e) => {
           cleanup(new Error(`Worker ${index} error: ${e.message}`))
         })
-        const chunk = this.array.slice(index * chunkSize, (index + 1) * chunkSize);
-        
+        const chunk = this.array.slice(
+          index * chunkSize,
+          (index + 1) * chunkSize
+        )
+
         const message: WorkerMessage<T, U> = {
           type,
           data: chunk,
           fn: fn.toString(), // Serialize the function to a string
           workerIndex: index,
-          context: this.serializedContext
-        };
-        worker.postMessage(message);
-      });
-    });
+          context: this.serializedContext,
+        }
+        worker.postMessage(message)
+      })
+    })
   }
 
   /**
@@ -203,9 +221,12 @@ export class AsyncArray<T> {
    * @param progressCallback An optional callback to report progress.
    * @returns A Promise that resolves with the new mapped array.
    */
-  public async map<U>(fn: (item: T) => U, progressCallback?: (progress: number) => void): Promise<U[]> {
-    const result = await this.dispatch<U>('map', fn, progressCallback);
-    return result as U[];
+  public async map<U>(
+    fn: (item: T) => U,
+    progressCallback?: (progress: number) => void
+  ): Promise<U[]> {
+    const result = await this.dispatch<U>('map', fn, progressCallback)
+    return result as U[]
   }
 
   /**
@@ -214,9 +235,12 @@ export class AsyncArray<T> {
    * @param progressCallback An optional callback to report progress.
    * @returns A Promise that resolves with the new filtered array.
    */
-  public async filter(fn: (item: T) => boolean, progressCallback?: (progress: number) => void): Promise<T[]> {
-    const result = await this.dispatch<T>('filter', fn, progressCallback);
-    return result as T[];
+  public async filter(
+    fn: (item: T) => boolean,
+    progressCallback?: (progress: number) => void
+  ): Promise<T[]> {
+    const result = await this.dispatch<T>('filter', fn, progressCallback)
+    return result as T[]
   }
 
   /**
@@ -225,8 +249,11 @@ export class AsyncArray<T> {
    * @param progressCallback An optional callback to report progress.
    * @returns A Promise that resolves when the operation is complete.
    */
-  public async forEach(fn: (item: T) => void, progressCallback?: (progress: number) => void): Promise<void> {
-    await this.dispatch<void>('forEach', fn, progressCallback);
+  public async forEach(
+    fn: (item: T) => void,
+    progressCallback?: (progress: number) => void
+  ): Promise<void> {
+    await this.dispatch<void>('forEach', fn, progressCallback)
   }
 
   /**
@@ -235,8 +262,11 @@ export class AsyncArray<T> {
    * @param progressCallback An optional callback to report progress.
    * @returns A Promise that resolves with the final reduced value.
    */
-  public async reduce<U>(fn: (accumulator: U, item: T) => U, progressCallback?: (progress: number) => void): Promise<U> {
-    const result = await this.dispatch<U>('reduce', fn, progressCallback);
-    return result as U;
+  public async reduce<U>(
+    fn: (accumulator: U, item: T) => U,
+    progressCallback?: (progress: number) => void
+  ): Promise<U> {
+    const result = await this.dispatch<U>('reduce', fn, progressCallback)
+    return result as U
   }
 }
