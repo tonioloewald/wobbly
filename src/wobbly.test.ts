@@ -1,151 +1,157 @@
-import { test, expect, beforeAll, afterAll } from 'bun:test';
-import { AsyncArray } from './wobbly';
+import { test, expect, beforeAll, afterAll } from 'bun:test'
+import { AsyncArray } from './wobbly'
 
 // We'll create a large array for testing performance-intensive operations
-const largeArray = Array.from({ length: 1e+7 }, (_, i) => Math.random() );
-let asyncArray: AsyncArray<number>;
+const largeArray = Array.from({ length: 1e7 }, (_, i) => Math.random())
+let asyncArray: AsyncArray<number>
 
 beforeAll(() => {
-  asyncArray = new AsyncArray(largeArray);
-});
+  asyncArray = new AsyncArray(largeArray)
+})
 
 test('map should perform a heavy operation and return the correct result', async () => {
   // A computationally heavy mapping function
-  const squareRootFn = (num: number) => Math.sqrt(num);
-  const expectedResult = largeArray.map(squareRootFn);
-  
-  const result = await asyncArray.map(squareRootFn);
-  
-  expect(result).toEqual(expectedResult);
-});
+  const squareRootFn = (num: number) => Math.sqrt(num)
+  const expectedResult = largeArray.map(squareRootFn)
+
+  const result = await asyncArray.map(squareRootFn)
+
+  expect(result).toEqual(expectedResult)
+})
 
 test('filter should perform a heavy operation and return the correct filtered array', async () => {
   // A computationally heavy filtering function
   const isPrimeFn = (num: number) => {
     for (let i = 2, s = Math.sqrt(num); i <= s; i++) {
-      if (num % i === 0) return false;
+      if (num % i === 0) return false
     }
-    return num > 1;
-  };
-  
+    return num > 1
+  }
+
   console.time('find primes serially')
-  const expectedResult = largeArray.filter(isPrimeFn);
+  const expectedResult = largeArray.filter(isPrimeFn)
   console.timeEnd('find primes serially')
-  
+
   console.time('find primes in parallel')
-  const result = await asyncArray.filter(isPrimeFn);
+  const result = await asyncArray.filter(isPrimeFn)
   console.timeEnd('find primes in parallel')
-  
-  expect(result).toEqual(expectedResult);
-});
+
+  expect(result).toEqual(expectedResult)
+})
 
 test('filter with context works', async () => {
   // A computationally heavy filtering function
-  function isOffsetFromPrime (num: number) {
+  function isOffsetFromPrime(num: number) {
     num = num + this.context
     for (let i = 2, s = Math.sqrt(num); i <= s; i++) {
-      if (num % i === 0) return false;
+      if (num % i === 0) return false
     }
-    return num > 1;
-  };
-  
+    return num > 1
+  }
+
   const context = { offset: 3 }
-  const expectedResult = largeArray.filter(isOffsetFromPrime.bind(context));
-  
-  const result = await asyncArray.withContext(context).filter(isOffsetFromPrime);
-  
-  expect(result).toEqual(expectedResult);
-});
+  const expectedResult = largeArray.filter(isOffsetFromPrime.bind(context))
+
+  const result = await asyncArray.withContext(context).filter(isOffsetFromPrime)
+
+  expect(result).toEqual(expectedResult)
+})
 
 test('filter should perform operations in parallel', async () => {
   // A computationally heavy filtering function
   const isPrimeFn = (num: number) => {
     for (let i = 2, s = Math.sqrt(num); i <= s; i++) {
-      if (num % i === 0) return false;
+      if (num % i === 0) return false
     }
-    return num > 1;
-  };
-  
+    return num > 1
+  }
+
   const isPerfectSquare = (num: number) => Math.sqrt(num) % 0 === 0
-  
-  const primes = largeArray.filter(isPrimeFn);
-  const squares = largeArray.filter(isPerfectSquare);
-  
+
+  const primes = largeArray.filter(isPrimeFn)
+  const squares = largeArray.filter(isPerfectSquare)
+
   console.time('find primes and squares in parallel')
   const [pPrimes, pSquares] = await Promise.all([
     asyncArray.filter(isPrimeFn),
-    asyncArray.filter(isPerfectSquare)
+    asyncArray.filter(isPerfectSquare),
   ])
   console.timeEnd('find primes and squares in parallel')
-  
-  expect(pPrimes.length).toEqual(primes.length);
-  expect(pSquares.length).toEqual(squares.length);
-});
+
+  expect(pPrimes.length).toEqual(primes.length)
+  expect(pSquares.length).toEqual(squares.length)
+})
 
 test('forEach should perform a heavy operation without returning a value', async () => {
   // The forEach operation should return nothing
-  const result = await asyncArray.forEach(() => {});
-  
-  expect(result).toBeUndefined();
-});
+  const result = await asyncArray.forEach(() => {})
+
+  expect(result).toBeUndefined()
+})
 
 test('reduce should perform a heavy operation and return the correct reduced value', async () => {
-  const sumReducer = (acc: number = 0, item: number) => acc + item;
-  const expectedResult = largeArray.reduce(sumReducer);
-  
-  const result = await asyncArray.reduce(sumReducer);
-  
-  // large numbers of floating point arithmetic operations may disagree slightly
-  expect(result.toFixed(2)).toEqual(expectedResult.toFixed(2));
-});
+  const sumReducer = (acc: number = 0, item: number) => acc + item
+  const expectedResult = largeArray.reduce(sumReducer)
 
+  const result = await asyncArray.reduce(sumReducer)
+
+  // large numbers of floating point arithmetic operations may disagree slightly
+  expect(result.toFixed(2)).toEqual(expectedResult.toFixed(2))
+})
 
 test('outer tier reduce works', async () => {
   const fruits = ['Tomato', 'Eggplant', 'Kiwi', 'Apple', 'Mango']
-  const fruitsArray = Array.from({ length: 1e+4 }, (_, i) => ({
-    fruit: fruits[Math.floor(Math.random() * fruits.length)]
-  }));
+  const fruitsArray = Array.from({ length: 1e4 }, (_, i) => ({
+    fruit: fruits[Math.floor(Math.random() * fruits.length)],
+  }))
   const asyncFruitArray = new AsyncArray(fruitsArray)
-  
-  function fruitCounter (counts = {}, item) {
+
+  function fruitCounter(counts = {}, item) {
     if (!this.final) {
-      counts[item.fruit] = (counts[item.fruit] || 0) + 1 
+      counts[item.fruit] = (counts[item.fruit] || 0) + 1
     } else {
-      for(const fruit of this.fruits) {
+      for (const fruit of this.fruits) {
         counts[fruit] = (counts[fruit] || 0) + item[fruit]
       }
     }
     return counts
   }
-  
-  const serialCounts = fruitsArray.reduce(fruitCounter.bind({fruits}), {})
-  const parallelCounts = await asyncFruitArray.withContext({fruits}).reduce(fruitCounter)
-  
+
+  console.time('serial fruit count')
+  const serialCounts = fruitsArray.reduce(fruitCounter.bind({ fruits }), {})
+  console.timeEnd('serial fruit count')
+
+  console.time('parallel fruit count')
+  const parallelCounts = await asyncFruitArray
+    .withContext({ fruits })
+    .reduce(fruitCounter)
+  console.timeEnd('parallel fruit count')
+
   expect(parallelCounts).toEqual(serialCounts)
-});
+})
 
 test('progress callback should be called with increasing values', async () => {
-  const progressReports: number[] = [];
+  const progressReports: number[] = []
   const progressCallback = (progress: number) => {
-    progressReports.push(progress);
-  };
+    progressReports.push(progress)
+  }
 
   const slowMapFn = (num: number) => {
-    let result = num;
+    let result = num
     for (let i = 0; i < 500; i++) {
-      result = Math.sqrt(result + i);
+      result = Math.sqrt(result + i)
     }
-    return result;
-  };
-  
-  await asyncArray.map(slowMapFn, progressCallback);
-  
+    return result
+  }
+
+  await asyncArray.map(slowMapFn, progressCallback)
+
   // We expect to get multiple progress reports
-  expect(progressReports.length).toBeGreaterThan(1);
+  expect(progressReports.length).toBeGreaterThan(1)
   // And that the last report is 1 (100% complete)
-  expect(progressReports[progressReports.length - 1]).toBe(1);
+  expect(progressReports[progressReports.length - 1]).toBe(1)
   // And that progress is always increasing
   for (let i = 0; i < progressReports.length - 1; i++) {
-    expect(progressReports[i]).toBeLessThanOrEqual(progressReports[i + 1]);
+    expect(progressReports[i]).toBeLessThanOrEqual(progressReports[i + 1])
   }
-});
+})
