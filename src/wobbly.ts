@@ -8,10 +8,7 @@ const workerScript = `
   self.onmessage = (event) => {
     const { type, data, fn, workerIndex, context } = event.data;
     const contextObj = JSON.parse(context);
-    let operationFn = new Function('return ' + fn)();
-    if (contextObj !== null) {
-      operationFn = operationFn.bind(contextObj)
-    }
+    const operationFn = (new Function('return ' + fn)()).bind(contextObj);
     
     try {
       let result;
@@ -37,7 +34,7 @@ const workerScript = `
           break;
         case 'reduce':
           // Fix for double-counting: correctly use the first element as the accumulator
-          result = data.reduce(operationFn);
+          result = data.reduce(operationFn, undefined);
           break;
         case 'forEach':
           data.forEach(processItem);
@@ -92,7 +89,7 @@ export class AsyncArray<T> {
     this.progressReportInterval = progressReportInterval;
   }
   
-  private serializedContext: string = 'null'
+  private serializedContext: string = '{}'
   
   public withContext(context: any): AsyncArray<T> {
     this.serializedContext = JSON.stringify(context)
@@ -124,7 +121,7 @@ export class AsyncArray<T> {
   private dispatch<U>(
     type: 'map' | 'forEach' | 'filter' | 'reduce',
     array: T[],
-    fn: (item: T, ...args: any[]) => any,
+    fn: (this: any, item: T, ...args: any[]) => any,
     progressCallback?: (progress: number) => void
   ): Promise<U[] | U | void> {
     const workers = this.initializeWorkers()
@@ -168,7 +165,10 @@ export class AsyncArray<T> {
               resolve((results as U[][]).flat());
             } else if (type === 'reduce') {
               // Re-reduce the results from each worker
-              const finalResult = (results as U[]).reduce(fn as any);
+              const context = Object.assign(JSON.parse(this.serializedContext), {final: true})
+              const reducer = fn.bind(context)
+              console.log(results, context, fn, reducer)
+              const finalResult = (results as U[]).reduce(reducer as any, undefined);
               resolve(finalResult);
             } else {
               resolve();

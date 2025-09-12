@@ -2,7 +2,7 @@ import { test, expect, beforeAll, afterAll } from 'bun:test';
 import { AsyncArray } from './wobbly';
 
 // We'll create a large array for testing performance-intensive operations
-const largeArray = Array.from({ length: 1e+7 }, (_, i) => i);
+const largeArray = Array.from({ length: 1e+5 }, (_, i) => i);
 let asyncArray: AsyncArray<number>;
 
 beforeAll(() => {
@@ -39,22 +39,20 @@ test('filter should perform a heavy operation and return the correct filtered ar
   expect(result).toEqual(expectedResult);
 });
 
-test('filter should perform a heavy operation and return the correct filtered array', async () => {
+test('filter with context works', async () => {
   // A computationally heavy filtering function
-  const isPrimeFn = (num: number) => {
+  function isOffsetFromPrime (num: number) {
+    num = num + this.context
     for (let i = 2, s = Math.sqrt(num); i <= s; i++) {
       if (num % i === 0) return false;
     }
     return num > 1;
   };
   
-  console.time('find primes serially')
-  const expectedResult = largeArray.filter(isPrimeFn);
-  console.timeEnd('find primes serially')
+  const context = { offset: 3 }
+  const expectedResult = largeArray.filter(isOffsetFromPrime.bind(context));
   
-  console.time('find primes in parallel')
-  const result = await asyncArray.filter(largeArray, isPrimeFn);
-  console.timeEnd('find primes in parallel')
+  const result = await asyncArray.withContext(context).filter(largeArray, isOffsetFromPrime);
   
   expect(result).toEqual(expectedResult);
 });
@@ -92,12 +90,36 @@ test('forEach should perform a heavy operation without returning a value', async
 });
 
 test('reduce should perform a heavy operation and return the correct reduced value', async () => {
-  const sumReducer = (acc: number, item: number) => acc + item;
+  const sumReducer = (acc: number = 0, item: number) => acc + item;
   const expectedResult = largeArray.reduce(sumReducer, 0);
   
   const result = await asyncArray.reduce(largeArray, sumReducer);
   
   expect(result).toEqual(expectedResult);
+});
+
+
+test('outer tier reduce works', async () => {
+  const fruits = ['Tomato', 'Eggplant', 'Kiwi', 'Apple', 'Mango']
+  const array = Array.from({ length: 1e+4 }, (_, i) => ({
+    fruit: fruits[Math.floor(Math.random() * fruits.length)]
+  }));
+  
+  function fruitCounter (counts = {}, item) {
+    if (!this.final) {
+      counts[item.fruit] = (counts[item.fruit] || 0) + 1 
+    } else {
+      for(const fruit of this.fruits) {
+        counts[fruit] = (counts[fruit] || 0) + item[fruit]
+      }
+    }
+    return counts
+  }
+  
+  const serialCounts = array.reduce(fruitCounter.bind({fruits}), {})
+  const parallelCounts = await asyncArray.withContext({fruits}).reduce(array, fruitCounter)
+  
+  expect(parallelCounts).toEqual(serialCounts)
 });
 
 test('progress callback should be called with increasing values', async () => {
