@@ -6,7 +6,7 @@ const largeArray = Array.from({ length: 1e+7 }, (_, i) => Math.random() );
 let asyncArray: AsyncArray<number>;
 
 beforeAll(() => {
-  asyncArray = new AsyncArray();
+  asyncArray = new AsyncArray(largeArray);
 });
 
 test('map should perform a heavy operation and return the correct result', async () => {
@@ -14,7 +14,7 @@ test('map should perform a heavy operation and return the correct result', async
   const squareRootFn = (num: number) => Math.sqrt(num);
   const expectedResult = largeArray.map(squareRootFn);
   
-  const result = await asyncArray.map(largeArray, squareRootFn);
+  const result = await asyncArray.map(squareRootFn);
   
   expect(result).toEqual(expectedResult);
 });
@@ -33,7 +33,7 @@ test('filter should perform a heavy operation and return the correct filtered ar
   console.timeEnd('find primes serially')
   
   console.time('find primes in parallel')
-  const result = await asyncArray.filter(largeArray, isPrimeFn);
+  const result = await asyncArray.filter(isPrimeFn);
   console.timeEnd('find primes in parallel')
   
   expect(result).toEqual(expectedResult);
@@ -52,7 +52,7 @@ test('filter with context works', async () => {
   const context = { offset: 3 }
   const expectedResult = largeArray.filter(isOffsetFromPrime.bind(context));
   
-  const result = await asyncArray.withContext(context).filter(largeArray, isOffsetFromPrime);
+  const result = await asyncArray.withContext(context).filter(isOffsetFromPrime);
   
   expect(result).toEqual(expectedResult);
 });
@@ -73,8 +73,8 @@ test('filter should perform operations in parallel', async () => {
   
   console.time('find primes and squares in parallel')
   const [pPrimes, pSquares] = await Promise.all([
-    asyncArray.filter(largeArray, isPrimeFn),
-    asyncArray.filter(largeArray, isPerfectSquare)
+    asyncArray.filter(isPrimeFn),
+    asyncArray.filter(isPerfectSquare)
   ])
   console.timeEnd('find primes and squares in parallel')
   
@@ -84,7 +84,7 @@ test('filter should perform operations in parallel', async () => {
 
 test('forEach should perform a heavy operation without returning a value', async () => {
   // The forEach operation should return nothing
-  const result = await asyncArray.forEach(largeArray, () => {});
+  const result = await asyncArray.forEach(() => {});
   
   expect(result).toBeUndefined();
 });
@@ -93,7 +93,7 @@ test('reduce should perform a heavy operation and return the correct reduced val
   const sumReducer = (acc: number = 0, item: number) => acc + item;
   const expectedResult = largeArray.reduce(sumReducer);
   
-  const result = await asyncArray.reduce(largeArray, sumReducer);
+  const result = await asyncArray.reduce(sumReducer);
   
   // large numbers of floating point arithmetic operations may disagree slightly
   expect(result.toFixed(2)).toEqual(expectedResult.toFixed(2));
@@ -102,9 +102,10 @@ test('reduce should perform a heavy operation and return the correct reduced val
 
 test('outer tier reduce works', async () => {
   const fruits = ['Tomato', 'Eggplant', 'Kiwi', 'Apple', 'Mango']
-  const array = Array.from({ length: 1e+4 }, (_, i) => ({
+  const fruitsArray = Array.from({ length: 1e+4 }, (_, i) => ({
     fruit: fruits[Math.floor(Math.random() * fruits.length)]
   }));
+  const asyncFruitArray = new AsyncArray(fruitsArray)
   
   function fruitCounter (counts = {}, item) {
     if (!this.final) {
@@ -117,8 +118,8 @@ test('outer tier reduce works', async () => {
     return counts
   }
   
-  const serialCounts = array.reduce(fruitCounter.bind({fruits}), {})
-  const parallelCounts = await asyncArray.withContext({fruits}).reduce(array, fruitCounter)
+  const serialCounts = fruitsArray.reduce(fruitCounter.bind({fruits}), {})
+  const parallelCounts = await asyncFruitArray.withContext({fruits}).reduce(fruitCounter)
   
   expect(parallelCounts).toEqual(serialCounts)
 });
@@ -137,7 +138,7 @@ test('progress callback should be called with increasing values', async () => {
     return result;
   };
   
-  await asyncArray.map(largeArray, slowMapFn, progressCallback);
+  await asyncArray.map(slowMapFn, progressCallback);
   
   // We expect to get multiple progress reports
   expect(progressReports.length).toBeGreaterThan(1);

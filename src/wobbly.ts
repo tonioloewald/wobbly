@@ -82,8 +82,9 @@ export class AsyncArray<T> {
   private readonly maxWorkers: number;
   private workerUrl: string | null = null;
   private progressReportInterval: number;
-
-  constructor(maxWorkers: number = navigator.hardwareConcurrency || 4, progressReportInterval: number = 100) {
+  private array: T[]
+  constructor(array: T[], maxWorkers: number = navigator.hardwareConcurrency || 4, progressReportInterval: number = 100) {
+    this.array = array;
     this.maxWorkers = maxWorkers;
     this.progressReportInterval = progressReportInterval;
   }
@@ -116,20 +117,18 @@ export class AsyncArray<T> {
   /**
    * Dispatches a task to the Web Worker pool.
    * @param type The type of array operation.
-   * @param array The array to process.
    * @param fn The function to apply to each element.
    * @param progressCallback An optional callback to report progress.
    * @returns A Promise that resolves with the result.
    */
   private dispatch<U>(
     type: 'map' | 'forEach' | 'filter' | 'reduce',
-    array: T[],
     fn: (this: any, item: T, ...args: any[]) => any,
     progressCallback?: (progress: number) => void
   ): Promise<U[] | U | void> {
     const workers = this.initializeWorkers()
     return new Promise((resolve, reject) => {
-      if (array.length === 0) {
+      if (this.array.length === 0) {
         if (progressCallback) progressCallback(1);
         resolve(type === 'map' || type === 'filter' ? [] : undefined);
         return;
@@ -140,7 +139,7 @@ export class AsyncArray<T> {
         if (e) reject(e); // Reject the promise on error
       };
 
-      const chunkSize = Math.ceil(array.length / this.maxWorkers);
+      const chunkSize = Math.ceil(this.array.length / this.maxWorkers);
       let results: (U[] | U | void)[] = new Array(this.maxWorkers);
       let receivedCount = 0;
       let lastReportedProgress = 0;
@@ -184,7 +183,7 @@ export class AsyncArray<T> {
         worker.addEventListener('error', (e) => {
           cleanup(new Error(`Worker ${index} error: ${e.message}`))
         })
-        const chunk = array.slice(index * chunkSize, (index + 1) * chunkSize);
+        const chunk = this.array.slice(index * chunkSize, (index + 1) * chunkSize);
         
         const message: WorkerMessage<T, U> = {
           type,
@@ -200,48 +199,44 @@ export class AsyncArray<T> {
 
   /**
    * Asynchronously maps an array using Web Workers.
-   * @param array The array to map.
    * @param fn The mapping function.
    * @param progressCallback An optional callback to report progress.
    * @returns A Promise that resolves with the new mapped array.
    */
-  public async map<U>(array: T[], fn: (item: T) => U, progressCallback?: (progress: number) => void): Promise<U[]> {
-    const result = await this.dispatch<U>('map', array, fn, progressCallback);
+  public async map<U>(fn: (item: T) => U, progressCallback?: (progress: number) => void): Promise<U[]> {
+    const result = await this.dispatch<U>('map', fn, progressCallback);
     return result as U[];
   }
 
   /**
    * Asynchronously filters an array using Web Workers.
-   * @param array The array to filter.
    * @param fn The filtering function.
    * @param progressCallback An optional callback to report progress.
    * @returns A Promise that resolves with the new filtered array.
    */
-  public async filter(array: T[], fn: (item: T) => boolean, progressCallback?: (progress: number) => void): Promise<T[]> {
-    const result = await this.dispatch<T>('filter', array, fn, progressCallback);
+  public async filter(fn: (item: T) => boolean, progressCallback?: (progress: number) => void): Promise<T[]> {
+    const result = await this.dispatch<T>('filter', fn, progressCallback);
     return result as T[];
   }
 
   /**
    * Asynchronously iterates over an array using Web Workers.
-   * @param array The array to iterate over.
    * @param fn The function to execute for each item.
    * @param progressCallback An optional callback to report progress.
    * @returns A Promise that resolves when the operation is complete.
    */
-  public async forEach(array: T[], fn: (item: T) => void, progressCallback?: (progress: number) => void): Promise<void> {
-    await this.dispatch<void>('forEach', array, fn, progressCallback);
+  public async forEach(fn: (item: T) => void, progressCallback?: (progress: number) => void): Promise<void> {
+    await this.dispatch<void>('forEach', fn, progressCallback);
   }
 
   /**
    * Asynchronously reduces an array using Web Workers.
-   * @param array The array to reduce.
    * @param fn The reducing function.
    * @param progressCallback An optional callback to report progress.
    * @returns A Promise that resolves with the final reduced value.
    */
-  public async reduce<U>(array: T[], fn: (accumulator: U, item: T) => U, progressCallback?: (progress: number) => void): Promise<U> {
-    const result = await this.dispatch<U>('reduce', array, fn, progressCallback);
+  public async reduce<U>(fn: (accumulator: U, item: T) => U, progressCallback?: (progress: number) => void): Promise<U> {
+    const result = await this.dispatch<U>('reduce', fn, progressCallback);
     return result as U;
   }
 }
