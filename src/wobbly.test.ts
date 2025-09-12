@@ -2,7 +2,7 @@ import { test, expect, beforeAll, afterAll } from 'bun:test';
 import { AsyncArray } from './wobbly';
 
 // We'll create a large array for testing performance-intensive operations
-const largeArray = Array.from({ length: 1e+5 }, (_, i) => i);
+const largeArray = Array.from({ length: 1e+7 }, (_, i) => i);
 let asyncArray: AsyncArray<number>;
 
 beforeAll(() => {

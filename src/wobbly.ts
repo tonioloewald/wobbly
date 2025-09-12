@@ -38,7 +38,6 @@ const workerScript = `
           break;
         case 'forEach':
           data.forEach(processItem);
-          console.log('forEach operation completed in worker:', workerIndex);
           break;
         default:
           console.error('Unknown operation type:', type);
@@ -167,7 +166,6 @@ export class AsyncArray<T> {
               // Re-reduce the results from each worker
               const context = Object.assign(JSON.parse(this.serializedContext), {final: true})
               const reducer = fn.bind(context)
-              console.log(results, context, fn, reducer)
               const finalResult = (results as U[]).reduce(reducer as any, undefined);
               resolve(finalResult);
             } else {
