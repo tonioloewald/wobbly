@@ -2,7 +2,7 @@ import { test, expect, beforeAll, afterAll } from 'bun:test';
 import { AsyncArray } from './wobbly';
 
 // We'll create a large array for testing performance-intensive operations
-const largeArray = Array.from({ length: 1e+7 }, (_, i) => i);
+const largeArray = Array.from({ length: 1e+7 }, (_, i) => Math.random() * 1000 );
 let asyncArray: AsyncArray<number>;
 
 beforeAll(() => {
@@ -95,7 +95,8 @@ test('reduce should perform a heavy operation and return the correct reduced val
   
   const result = await asyncArray.reduce(largeArray, sumReducer);
   
-  expect(result).toEqual(expectedResult);
+  // large numbers of floating point arithmetic operations may disagree slightly
+  expect(result.toFixed(2)).toEqual(expectedResult.toFixed(2));
 });
 
 
