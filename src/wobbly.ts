@@ -15,7 +15,7 @@ const workerScript = `
     try {
       const total = data.length;
       let processed = 0;
-      const reportInterval = Math.max(1, Math.floor(total / 100)); // Report progress at least 10 times
+      const reportInterval = Math.max(1, Math.floor(total / 100));
       const contextObj = JSON.parse(context);
       
       contextObj.progress = () => {
@@ -89,7 +89,7 @@ export class AsyncArray<T> {
   private array: T[]
   constructor(
     array: T[],
-    maxWorkers: number = navigator.hardwareConcurrency || 4,
+    maxWorkers: number = (navigator.hardwareConcurrency || 2) * 0.5,
     progressReportInterval: number = 100
   ) {
     this.array = array
@@ -135,16 +135,16 @@ export class AsyncArray<T> {
   ): Promise<U[] | U | void> {
     const workers = this.initializeWorkers()
 
-    const cleanup = (e?: Error) => {
-      workers.forEach((worker) => worker.terminate())
-      if (e) reject(e)
-    }
-
     return new Promise((resolve, reject) => {
       if (this.array.length === 0) {
         if (progressCallback) progressCallback(1)
         resolve(type === 'map' || type === 'filter' ? [] : undefined)
         return
+      }
+
+      const cleanup = (e?: Error) => {
+        workers.forEach((worker) => worker.terminate())
+        if (e) reject(e)
       }
 
       const chunkSize = Math.ceil(this.array.length / this.maxWorkers)
@@ -153,6 +153,7 @@ export class AsyncArray<T> {
       let lastReportedProgress = 0
       let workerProgress: number[] = new Array(this.maxWorkers).fill(0)
 
+      const taskId = Math.random()
       const onMessage = (event: MessageEvent<WorkerResult<U>>) => {
         const { type: messageType, result, workerIndex, progress } = event.data
 
