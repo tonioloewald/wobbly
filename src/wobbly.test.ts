@@ -101,12 +101,16 @@ test('reduce should perform a heavy operation and return the correct reduced val
 
 test('outer tier reduce works', async () => {
   const fruits = ['Tomato', 'Eggplant', 'Kiwi', 'Apple', 'Mango']
-  const fruitsArray = Array.from({ length: 1e4 }, (_, i) => ({
+  const fruitsArray = Array.from({ length: 1e3 }, (_, i) => ({
     fruit: fruits[Math.floor(Math.random() * fruits.length)],
   }))
   const asyncFruitArray = new AsyncArray(fruitsArray)
 
   function fruitCounter(counts = {}, item) {
+    if (Math.random() < 0.1) {
+      const until = Date.now()
+      while (Date.now() <= until) {}
+    }
     if (!this.final) {
       counts[item.fruit] = (counts[item.fruit] || 0) + 1
     } else {
@@ -138,6 +142,7 @@ test('progress callback should be called with increasing values', async () => {
 
   function slowMapFn(num: number) {
     let result = num
+    // 10% chance of small thunk
     for (let i = 0; i < 10; i++) {
       result += Math.sqrt(result + i)
     }

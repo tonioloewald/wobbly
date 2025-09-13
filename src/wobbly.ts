@@ -57,6 +57,22 @@ const workerScript = `
 
 const workerBlob = new Blob([workerScript], { type: 'application/javascript' })
 const WORKER_URL = URL.createObjectURL(workerBlob)
+const MAX_WORKERS = navigator.hardwareConcurrency || 4
+const WORKER_POOL = Array.from(
+  { length: MAX_WORKERS },
+  () => new Worker(WORKER_URL)
+)
+
+async function getWorkers(count = Math.ceil(MAX_WORKERS / 2)) {
+  if (count > MAX_WORKERS) {
+    count = MAX_WORKERS
+  }
+  while (WORKER_POOL.length < count) {
+    console.log(WORKER_POOL.length, 'workers available')
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+  return WORKER_POOL.splice(0, count)
+}
 
 /**
  * A type to represent the message sent from the main thread to the worker.
@@ -83,17 +99,11 @@ interface WorkerResult<U> {
  * It creates a pool of workers and distributes tasks among them.
  */
 export class AsyncArray<T> {
-  private readonly maxWorkers: number
   private workerUrl: string | null = null
   private progressReportInterval: number
   private array: T[]
-  constructor(
-    array: T[],
-    maxWorkers: number = (navigator.hardwareConcurrency || 2) * 0.5,
-    progressReportInterval: number = 100
-  ) {
+  constructor(array: T[], progressReportInterval: number = 100) {
     this.array = array
-    this.maxWorkers = maxWorkers
     this.progressReportInterval = progressReportInterval
   }
 
@@ -114,7 +124,7 @@ export class AsyncArray<T> {
   private initializeWorkers(): Worker[] {
     const workers: Worker[] = []
 
-    for (let i = 0; i < this.maxWorkers; i++) {
+    for (let i = 0; i < MAX_WORKERS; i++) {
       workers.push(new Worker(WORKER_URL))
     }
 
@@ -128,12 +138,12 @@ export class AsyncArray<T> {
    * @param progressCallback An optional callback to report progress.
    * @returns A Promise that resolves with the result.
    */
-  private dispatch<U>(
+  private async dispatch<U>(
     type: 'map' | 'forEach' | 'filter' | 'reduce',
     fn: (this: any, item: T, ...args: any[]) => any,
     progressCallback?: (progress: number) => void
   ): Promise<U[] | U | void> {
-    const workers = this.initializeWorkers()
+    const workers = await getWorkers() // this.initializeWorkers()
 
     return new Promise((resolve, reject) => {
       if (this.array.length === 0) {
@@ -142,16 +152,11 @@ export class AsyncArray<T> {
         return
       }
 
-      const cleanup = (e?: Error) => {
-        workers.forEach((worker) => worker.terminate())
-        if (e) reject(e)
-      }
-
-      const chunkSize = Math.ceil(this.array.length / this.maxWorkers)
-      let results: (U[] | U | void)[] = new Array(this.maxWorkers)
+      const chunkSize = Math.ceil(this.array.length / workers.length)
+      let results: (U[] | U | void)[] = new Array(workers.length)
       let receivedCount = 0
       let lastReportedProgress = 0
-      let workerProgress: number[] = new Array(this.maxWorkers).fill(0)
+      let workerProgress: number[] = new Array(workers.length).fill(0)
 
       const taskId = Math.random()
       const onMessage = (event: MessageEvent<WorkerResult<U>>) => {
@@ -160,7 +165,7 @@ export class AsyncArray<T> {
         if (messageType === 'progress' && progressCallback) {
           workerProgress[workerIndex] = progress || 0
           const totalProgress =
-            workerProgress.reduce((sum, p) => sum + p, 0) / this.maxWorkers
+            workerProgress.reduce((sum, p) => sum + p, 0) / workers.length
           if (
             totalProgress - lastReportedProgress >= 0.01 ||
             totalProgress === 1
@@ -172,8 +177,8 @@ export class AsyncArray<T> {
           results[workerIndex] = result
           receivedCount++
 
-          if (receivedCount === this.maxWorkers) {
-            cleanup()
+          if (receivedCount === workers.length) {
+            WORKER_POOL.push(...workers)
 
             if (type === 'map' || type === 'filter') {
               resolve((results as U[][]).flat())
@@ -197,7 +202,11 @@ export class AsyncArray<T> {
       workers.forEach((worker, index) => {
         worker.addEventListener('message', onMessage)
         worker.addEventListener('error', (e) => {
-          cleanup(new Error(`Worker ${index} error: ${e.message}`))
+          for (const worker of workers) {
+            worker.terminate()
+            WORKER_POOL.push(new Worker(WORKER_URL))
+          }
+          reject(new Error(e))
         })
         const chunk = this.array.slice(
           index * chunkSize,
