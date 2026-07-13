@@ -9,11 +9,33 @@ const KERNEL_B64 = Buffer.from(KERNEL_BYTES).toString('base64')
 const DIST = await Bun.file(
   new URL('../dist/index.js', import.meta.url).pathname
 ).text()
+const WORKER_DIST = await Bun.file(
+  new URL('../dist/worker.js', import.meta.url).pathname
+).text()
+
+// A stateful agent module — the GM shape. Imports the worker helper; state is
+// resident and never crosses the membrane.
+const AGENT_MODULE = `
+import { serve } from './wobbly-worker.js'
+const world = { npcs: [] }
+let beats = 0
+serve({
+  player(ev, { emit }) {
+    beats++
+    if (ev.pos > 100 && world.npcs.length < 3) {
+      const npc = { id: 'npc' + world.npcs.length, plot: 'stranger-with-a-map' }
+      world.npcs.push(npc)
+      emit('spawn', npc)
+    }
+  },
+  stats: () => ({ beats, npcs: world.npcs.length }),
+})
+`
 
 const PAGE = `<!doctype html><meta charset=utf8><body><script type="module" src="./test.js"></script></body>`
 
 const TEST = `
-import { AsyncArray, sharedMemoryAvailable } from './wobbly.js'
+import { AsyncArray, sharedMemoryAvailable, spawn } from './wobbly.js'
 
 const results = []
 const check = async (name, fn) => {
@@ -69,6 +91,22 @@ await check('shared zero-copy map with out', async () => {
   return 'in-place ok, out[999]=' + outp[999]
 })
 
+// spawn(): a long-lived module worker with RESIDENT state. import() is not
+// eval, so this must work even where the JS-callback path is refused.
+await check('spawn: agent with resident state (no eval)', async () => {
+  const gm = await spawn('/agent.js', { readyTimeout: 8000 })
+  const spawned = []
+  gm.on('spawn', (npc) => spawned.push(npc))
+  gm.send('player', { pos: 50 })
+  gm.send('player', { pos: 150 })
+  gm.send('player', { pos: 300 })
+  const stats = await gm.call('stats')
+  gm.terminate()
+  if (stats.beats !== 3) throw new Error('lost events: ' + stats.beats)
+  if (stats.npcs !== 2) throw new Error('state not resident: ' + stats.npcs)
+  return \`resident state across \${stats.beats} events, \${spawned.length} recipes emitted\`
+})
+
 // A WASM kernel is a PAYLOAD, not a closure — so it needs no eval. This proves
 // the eval-free path really is eval-free, and needs no SharedArrayBuffer.
 await check('WASM kernel (no eval, no SAB)', async () => {
@@ -108,6 +146,7 @@ const SHARED_OPS = [
   'shared zero-copy map with out',
 ]
 const KERNEL = 'WASM kernel (no eval, no SAB)'
+const SPAWN = 'spawn: agent with resident state (no eval)'
 // The kernel is NOT magic: a CSP that grants neither `wasm-unsafe-eval` nor
 // `unsafe-eval` blocks WebAssembly.compile() as well ("Compiling or
 // instantiating WebAssembly module violates ... 'unsafe-eval' is not an
@@ -147,8 +186,8 @@ const REGIMES: Record<string, Regime> = {
     // The blob worker is refused before `new Function()` is ever reached, so
     // every operation fails — but it must fail *cleanly*, naming CSP. WASM is
     // blocked here too: with neither grant, `WebAssembly.compile` is refused.
-    blocked: [...WOBBLY_OPS, ...SHARED_OPS, KERNEL],
-    why: 'neither grant: even WebAssembly.compile is refused',
+    blocked: [...WOBBLY_OPS, ...SHARED_OPS, KERNEL, SPAWN],
+    why: 'neither grant, and worker-src is unset: even the blob worker is refused',
   },
   "CSP: 'wasm-unsafe-eval' but NO 'unsafe-eval'": {
     headers: {
@@ -187,6 +226,14 @@ for (const [label, regime] of Object.entries(REGIMES)) {
       if (url.pathname === '/test.js') {
         h.set('Content-Type', 'text/javascript')
         return new Response(TEST, { headers: h })
+      }
+      if (url.pathname === '/wobbly-worker.js') {
+        h.set('Content-Type', 'text/javascript')
+        return new Response(WORKER_DIST, { headers: h })
+      }
+      if (url.pathname === '/agent.js') {
+        h.set('Content-Type', 'text/javascript')
+        return new Response(AGENT_MODULE, { headers: h })
       }
       h.set('Content-Type', 'text/html')
       return new Response(PAGE, { headers: h })

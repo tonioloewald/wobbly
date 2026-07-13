@@ -3,6 +3,37 @@
 All notable changes to this project are documented here, in
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
+## [0.6.0] — 2026-07-13
+
+**wobbly's real product, finally named: put the work where the data is.** The membrane is what makes
+workers lose ([SHOULD-YOU-USE-A-WORKER.md](./SHOULD-YOU-USE-A-WORKER.md)), so the winning shapes are
+the ones that never send data across it — an agent whose state is _resident_, or processing where
+the worker _fetches its own data_. `AsyncArray`, which drags data to the work, is the weakest thing
+here and the only one needing `unsafe-eval`.
+
+### Added
+
+- **`spawn(moduleUrl)`** — host a long-lived module worker with no build step and **no eval**. A
+  Blob URL inherits the document's origin, so the shim can dynamic-`import()` your module by
+  absolute URL, even cross-origin. `import()` is not eval. Verified in Chromium under a CSP that
+  refuses `unsafe-eval` — where `AsyncArray` is refused and `spawn` works.
+  Returns a handle with `send` / `call` / `on` / `terminate`.
+- **`wobbly-js/worker`** — `serve(handlers)` for the worker side. Your module is a real module: it
+  can import anything, and its state is resident. Returned `TypedArray`s are **transferred**, not
+  cloned, so a big result is free. Handlers may be async; a throw rejects the caller's `call()`.
+- `warmWorkerPool()` (0.4.0) plus a worker-start failure message that names CSP, since that is
+  nearly always the cause.
+
+### Docs
+
+- **`PAYLOADS.md`** — four payloads can cross into a worker, and **only one needs `unsafe-eval`**:
+  the serialized closure, which serves the narrowest and usually-losing use case. ES modules, WASM
+  kernels, and AJS ASTs are all eval-free.
+- **`SHOULD-YOU-USE-A-WORKER.md`** — measured, and written to talk you _out_ of it.
+- **`KERNEL-CONTRACT.md`** — draft WASM kernel spec, published rather than requested.
+- Corrected an earlier benchmark of mine that flattered the AJS VM (8×); the honest figure for a
+  tight predicate is **23× slower than native**, which settles that AJS is not a callback path.
+
 ## [0.5.0] — 2026-07-13
 
 ### Added
@@ -143,6 +174,7 @@ First published release, as `wobbly-js` on npm (the bare name `wobbly` is taken)
 - Noted that floating-point addition is not truly associative, so a parallel sum is not
   bit-identical to a serial one.
 
+[0.6.0]: https://github.com/tonioloewald/wobbly/releases/tag/v0.6.0
 [0.5.0]: https://github.com/tonioloewald/wobbly/releases/tag/v0.5.0
 [0.4.0]: https://github.com/tonioloewald/wobbly/releases/tag/v0.4.0
 [0.3.0]: https://github.com/tonioloewald/wobbly/releases/tag/v0.3.0

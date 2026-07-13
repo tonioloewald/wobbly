@@ -142,6 +142,71 @@ const primes = await new AsyncArray(numbers).filter(isPrime)
 `AsyncArray` splits the array into one contiguous chunk per worker and reassembles the results **in
 input order**, so `map` and `filter` return exactly what the built-in methods would.
 
+## `spawn()` — a stateful worker, no build step, no eval
+
+`AsyncArray` drags data _to_ the work. **`spawn()` puts the work where the data is** — and that is
+the only thing that reliably pays (see [SHOULD-YOU-USE-A-WORKER.md](./SHOULD-YOU-USE-A-WORKER.md)).
+
+It hosts _your module_ in a long-lived worker. `new Worker(url)` demands a same-origin script, which
+is why a CDN-loaded library can't use workers at all; a Blob URL inherits the **document's** origin,
+so it may dynamic-`import()` your module by absolute URL — even cross-origin. **`import()` is not
+eval**, so unlike `AsyncArray` this needs no `'unsafe-eval'`. Verified in Chromium under a CSP that
+refuses it.
+
+```js
+// main thread
+import { spawn } from 'wobbly-js'
+
+const gm = await spawn('https://cdn.example/game-master.js')
+
+gm.on('spawn', (npc) => world.place(npc)) // recipes out
+gm.send('player', { pos, action }) // events in
+const stats = await gm.call('stats') // request/response
+```
+
+```js
+// game-master.js — a real module. Import anything. State is RESIDENT.
+import { serve } from 'wobbly-js/worker'
+
+const world = { npcs: [] } // never crosses the membrane
+let beats = 0
+
+serve({
+  player(event, { emit }) {
+    beats++
+    const npc = decide(world, event) // your agent, your VM, your rules
+    if (npc) emit('spawn', npc) // a recipe, not data
+  },
+  stats: () => ({ beats, npcs: world.npcs.length }),
+})
+```
+
+### The two shapes this is for
+
+**1. An agent with resident state.** A story graph, a planner, a simulation brain. Its world model
+lives in the worker and _never crosses_. Only a small event goes in and a small recipe comes out.
+Pair it with a fuel-metered VM (tjs-lang's `AgentVM`) and you get something JS cannot otherwise do:
+**cooperative preemption.** Give the agent 2ms of fuel, it yields, you resume it — so it can never
+stall your frame. wobbly's own `AsyncArray` cancellation can only _terminate_ a worker, because a JS
+hot loop cannot be interrupted.
+
+**2. Processing where the data lives.** The worker **fetches its own data** — from the network, from
+IndexedDB — crunches it, and returns a compact result. The raw bytes never touch the main thread.
+
+```js
+serve({
+  async report({ url }) {
+    const raw = await fetch(url).then((r) => r.arrayBuffer()) // fetched HERE
+    return summarise(raw) // only this crosses
+  },
+})
+```
+
+Any `TypedArray` you return is **transferred**, not copied — so a big result is free.
+
+Handlers may be async. A thrown error rejects the corresponding `call()`. If the worker fails to
+start, the error names CSP, because that is nearly always what it is.
+
 ## Your callback has no closure
 
 This is the one rule that matters, and everything else follows from it.

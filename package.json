@@ -1,6 +1,6 @@
 {
   "name": "wobbly-js",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Parallelize map, filter, reduce and forEach over large arrays using Web Workers.",
   "type": "module",
   "main": "./dist/index.js",
@@ -11,6 +11,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./worker": {
+      "types": "./dist/worker.d.ts",
+      "import": "./dist/worker.js",
+      "default": "./dist/worker.js"
     }
   },
   "files": [
@@ -44,7 +49,7 @@
     "typecheck": "tsc --noEmit",
     "test:browser": "bun bin/browser-check.ts",
     "format": "prettier --write .",
-    "pack": "bun test && bun run typecheck && bun build index.ts --sourcemap=linked --minify --outdir=dist && bunx tsc index.ts --declaration --emitDeclarationOnly --outDir dist --skipLibCheck && bun run show-size",
+    "pack": "bun test && bun run typecheck && bun build index.ts worker.ts --sourcemap=linked --minify --outdir=dist && bunx tsc index.ts worker.ts --declaration --emitDeclarationOnly --outDir dist --target esnext --module esnext --moduleResolution bundler --skipLibCheck && bun run show-size",
     "show-size": "gzip -9 -k dist/index.js && ls -lh dist/index.js.gz && rm dist/index.js.gz",
     "prepublishOnly": "bun run pack"
   },
