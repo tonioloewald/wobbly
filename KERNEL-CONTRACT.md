@@ -64,75 +64,143 @@ UTF-8 JSON at `[__wobbly_descriptor, +__wobbly_descriptor_len)`:
 ```json
 {
   "wobbly": 0,
+  "config": { "type": "f32", "len": 32 },
   "entries": {
     "buildTile": {
-      "in": { "type": "f32", "stride": 4 },
-      "out": { "type": "f32", "stride": 3 },
+      "kind": "generate",
+      "params": { "type": "f32", "len": 4 },
+      "out": { "type": "f32", "stride": 6 },
       "scratch": 65536
+    },
+    "smooth": {
+      "kind": "map",
+      "in": { "type": "f32", "stride": 1 },
+      "out": { "type": "f32", "stride": 1 }
     }
   }
 }
 ```
 
 - `wobbly` — contract version. `0` while this is a draft.
-- `entries` — one per callable export, keyed by export name.
-- `in` / `out` — element type (`f32` `f64` `i32` `u32` `i16` `u16` `i8` `u8`) and **stride**: how
-  many elements make up one logical item. `stride: 3` means each item is an `xyz` triple, so a
-  1000-item output needs 3000 `f32` slots. Stride is what lets a generic pool size the buffers
-  without knowing anything about the kernel.
-- `scratch` — optional bytes of working memory the kernel wants reserved per instance.
+- `config` — optional. A region written **once per worker**, before any call, and read by
+  `__wobbly_init`. This is where the seed and the scene constants live. It is the kernel's
+  _resident state_, and it is why a generator never re-sends its noise tables. See below.
+- `entries` — one per callable export, keyed by export name. Every entry declares a **`kind`**.
+- `in` / `out` / `params` — element type (`f32` `f64` `i32` `u32` `i16` `u16` `i8` `u8`) plus either
+  a **`stride`** (elements per logical item — `stride: 6` = position + normal, so 625 vertices need
+  3750 `f32` slots) or a fixed **`len`**. Stride is what lets a _generic_ pool size buffers without
+  knowing anything about the kernel.
+- `scratch` — optional per-instance working memory, in bytes.
 
 **No entry may allocate, and none may call `memory.grow()`.** Growth detaches every JS `TypedArray`
 view onto the old buffer — a classic and maddening bug — so a fixed arena makes it impossible by
 construction. Capacity is a _policy_ (drop / chunk), never an error.
 
-### 3. Entry point signature
+### 3. Entry kinds
+
+There are three, and **`generate` is not an afterthought** — it is the workload most likely to use
+kernels at all. (Resolved from open question 3 of the first draft, on tosijs-3d's correction: they
+build tiles from a seeded noise field, so _there is no input array_. The only large transfer is
+worker → main.)
+
+| kind           | signature                              | returns                    |
+| -------------- | -------------------------------------- | -------------------------- |
+| **`generate`** | `(paramsPtr, outPtr, capacity) -> i32` | items written              |
+| **`map`**      | `(inPtr, outPtr, count) -> i32`        | items written (= `count`)  |
+| **`filter`**   | `(inPtr, outPtr, count) -> i32`        | items **kept** (≤ `count`) |
 
 ```wat
-(func $buildTile (param $inPtr i32) (param $outPtr i32) (param $count i32) (result i32))
+;; the generator case: a recipe in, a buffer out. No input array exists.
+(func $buildTile (param $paramsPtr i32) (param $outPtr i32) (param $capacity i32) (result i32))
 ```
 
-- `inPtr` — byte offset of the input items, `count × in.stride` elements of `in.type`.
-- `outPtr` — byte offset of the output region, capacity `count × out.stride`.
-- `count` — number of **logical items** (not elements, not bytes).
-- **returns** — number of items actually written to `outPtr`. Equal to `count` for a `map`; **less**
-  for a `filter`. A negative value is an error code.
+- `paramsPtr` — the recipe: `params.len` elements. Tens of bytes. `{cx, cz, tileSize, subdivisions}`.
+- `outPtr` — output region, capacity `capacity × out.stride` elements.
+- `capacity` — the most the pool is willing to receive. The kernel returns how many it wrote.
+- A negative return is an error code.
 
-One call per **chunk**, never per item. The N-crossings-per-item mistake is what makes naïve WASM
-lose to plain JS — see [tjs-lang#9](https://github.com/tonioloewald/tjs-lang/issues/9), where a
+Note what this buys: **the input is tiny by construction, and the output is transferred.** The
+membrane cost is zero in both directions, however big the tile.
+
+One call per **chunk or job**, never per item. The N-crossings-per-item mistake is what makes naïve
+WASM lose to plain JS — see [tjs-lang#9](https://github.com/tonioloewald/tjs-lang/issues/9), where a
 hidden per-call copy made a SIMD demo **4.4× slower** than JS.
+
+### 3a. Resident state: send the seed, not the table
+
+`__wobbly_init` is called **once per instance**, after the `config` region is written. A seeded noise
+kernel builds its permutation table there, from the seed, in microseconds.
+
+**Do not ship the table.** It is a pure function of the seed, so transmitting it is transmitting a
+cache of something cheaper to recompute. This is the kernel-level statement of _send the recipe, not
+the data_, and it is why a generator's per-job payload stays at tens of bytes forever.
 
 ### 4. What wobbly does with it
 
 ```js
 const kernel = await Kernel.compile(wasmBytesOrModule) // main thread, once
-await new AsyncArray(input).mapKernel(kernel, 'buildTile')
+kernel.configure({ seed, grossScale, detailScale }) // once per worker
+
+// generator: no input array — recipes in, buffers out
+const tiles = await new AsyncArray(recipes).generateKernel(kernel, 'buildTile')
+
+// transform: an input array does exist
+const smoothed = await new AsyncArray(heights).mapKernel(kernel, 'smooth')
 ```
 
 1. Compile the Module **once** on the main thread.
 2. `postMessage` the Module to each worker (structured-cloneable — no recompile, no fetch).
-3. Each worker instantiates it, reads the descriptor from memory, calls `__wobbly_init` if present.
-4. Per chunk: write inputs into the kernel's memory at `inPtr` (or, when the memory is `shared`,
-   simply _point at_ the caller's arena), call the entry, read back `count` items from `outPtr`.
+3. Each worker instantiates it, writes `config`, calls `__wobbly_init`. The seed becomes a noise
+   table here, once, and stays resident.
+4. Per job: write the recipe at `paramsPtr`, call the entry, read back the items it reports writing —
+   and **transfer** the result out.
 
 No `new Function()`. No callback source. **No `'unsafe-eval'`.**
 
+### 5. The buffer-return problem (unsolved, and specific to generators)
+
+**Transfer moves ownership.** When a worker transfers a 15KB tile to the main thread, that buffer is
+_gone from the worker_ — so it must allocate a fresh one for the very next tile. Generation therefore
+forces an allocation per job, which collides head-on with tosijs-3d's _no allocation per job_
+requirement (their worst frames are as likely to be a GC pause as compute).
+
+Measured on the real shape — 60 bursts × 24 tiles, ~380KB out per burst, 23.4MB total:
+
+|                                |            |
+| ------------------------------ | ---------- |
+| burst latency, median          | 0.57ms     |
+| burst latency, **p100 (tail)** | **2.67ms** |
+| tail ÷ median                  | **4.7×**   |
+| worst main-thread block        | 1.27ms     |
+
+So the jitter they predicted is **real and visible** — the tail is nearly 5× the median — but in
+absolute terms it is still far inside a 16.7ms frame budget. **It is not worth fixing yet.** It would
+start to matter with more tiles, bigger tiles, or a weaker device.
+
+The fix, when it _is_ worth it, is **buffer ping-pong**: the main thread hands spent buffers back to
+the pool, and the worker writes into a recycled one instead of allocating. That wants the task-pool
+primitive (a `release(buffer)` call), not `AsyncArray`. Recording the measurement here so the
+decision stays evidence-based rather than superstitious.
+
 ## Open questions
 
-Genuinely open — this is a draft and these are the parts I'm least sure of:
+Genuinely open — this is a draft, and these are the parts I am least sure of:
 
-1. **Is a JS fallback part of the contract or beside it?** tjs-lang emits a `fallback { }` JS
+1. **Is a JS fallback part of the contract, or beside it?** tjs-lang emits a `fallback { }` JS
    implementation, which doubles as the conformance reference and the graceful-degradation path.
    Should a kernel be able to _carry_ one? That would reintroduce a code payload, and with it
    `unsafe-eval` — so probably it must stay beside the kernel, supplied by the caller.
 2. **Multiple inputs.** A kernel taking two input arrays (positions _and_ a mask) doesn't fit
    `(inPtr, outPtr, count)`. Extend to `(inPtrs[], outPtr, count)`, or leave multi-input out of v0?
-3. **The generator case has no input at all.** Terrain sends a _recipe_, not an array — the whole
-   point of "send the recipe, not the data". Perhaps `in: null` plus a params region written once
-   per job. This is the workload most likely to use kernels, so v1 shouldn't botch it.
+3. ~~**The generator case has no input at all.**~~ **Resolved** — `kind: "generate"` is now a
+   first-class entry, with a `params` recipe and a `config` region for resident state. Raised by
+   tosijs-3d; it is the workload most likely to use kernels, and the first draft had it as an
+   afterthought.
 4. **Who owns `scratch`?** Per-instance and reused across calls, or reset per call? Reuse is faster
-   and matches "no allocation per job"; reset is safer.
+   and matches "no allocation per job"; reset is safer. Leaning reuse, since the kernel is trusted
+   code the caller compiled.
 5. **Errors.** A negative return is thin. Reserve a small error-code region in memory instead?
+6. **Buffer return** — see §5. Needs the task pool, not `AsyncArray`.
 
 ## Prior art / obligations
 
