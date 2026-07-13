@@ -351,11 +351,23 @@ wobbly builds its worker from a `Blob` URL and rebuilds your callback inside it 
 `new Function()`. There's nothing to configure and nothing to serve: `import` it and go. That's the
 whole point of the library.
 
-**The price is `unsafe-eval`.** `new Function()` is blocked by a strict Content-Security-Policy, so
-wobbly will not run under one, and it cannot be used in a Chrome MV3 extension at all. (It also
-needs `worker-src blob:`.) If you're locked down that hard, you need a real worker file and a
-library like [comlink](https://github.com/GoogleChromeLabs/comlink) — and you'll be doing the build
-setup wobbly exists to avoid. That's the trade, made deliberately.
+**The price is a CSP grant.** Verified in Chromium, wobbly needs **two** directives:
+
+```
+script-src 'unsafe-eval';   # to rebuild your callback inside the worker
+worker-src blob:;           # to spawn the worker at all
+```
+
+Grant both and wobbly works under a Content-Security-Policy — tested. Grant neither and it fails
+cleanly (it rejects, with an error that names CSP; it does not hang).
+
+Note the order of failure, which is not what you'd guess: under `script-src 'self'` the **blob
+worker is refused first**, before `new Function()` is ever reached. So `worker-src blob:` is the
+directive people miss.
+
+If you can't grant those — a hardened enterprise CSP, or a Chrome MV3 extension — you need a real
+worker file and something like [comlink](https://github.com/GoogleChromeLabs/comlink), and you'll be
+doing the build setup wobbly exists to avoid. That's the trade, made deliberately.
 
 ## Worker pool
 

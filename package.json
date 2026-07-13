@@ -42,6 +42,7 @@
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit",
+    "test:browser": "bun bin/browser-check.ts",
     "format": "prettier --write .",
     "pack": "bun test && bun run typecheck && bun build index.ts --sourcemap=linked --minify --outdir=dist && bunx tsc index.ts --declaration --emitDeclarationOnly --outDir dist --skipLibCheck && bun run show-size",
     "show-size": "gzip -9 -k dist/index.js && ls -lh dist/index.js.gz && rm dist/index.js.gz",
@@ -49,6 +50,7 @@
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "playwright-core": "1.57.0",
     "prettier": "2.8.8",
     "typescript": "^5"
   }

@@ -628,7 +628,17 @@ export class AsyncArray<T, C extends ArrayLike<T> = T[]> {
       }
 
       const onError = (event: ErrorEvent) => {
-        fail(new Error(event.message || 'wobbly worker failed'))
+        // A worker that fails to *start* fires an error event with no message.
+        // In practice that means CSP: verified in Chromium, `script-src 'self'`
+        // blocks the blob worker before `new Function()` is ever reached. Say
+        // so — "wobbly worker failed" on its own sends people hunting in the
+        // wrong place.
+        fail(
+          new Error(
+            event.message ||
+              "wobbly worker failed to start — this is almost always a Content-Security-Policy problem. wobbly needs `worker-src blob:` (or `child-src blob:`) to spawn its worker, and `script-src 'unsafe-eval'` to rebuild your callback inside it."
+          )
+        )
       }
 
       const onAbort = () => fail(signal!.reason)
