@@ -1,11 +1,54 @@
 {
-  "name": "wobbly",
-  "module": "index.ts",
+  "name": "wobbly-js",
+  "version": "0.1.0",
+  "description": "Parallelize map, filter, reduce and forEach over large arrays using Web Workers.",
   "type": "module",
-  "devDependencies": {
-    "@types/bun": "latest"
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
   },
-  "peerDependencies": {
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "web-worker",
+    "worker",
+    "parallel",
+    "concurrency",
+    "multithreading",
+    "array",
+    "map",
+    "filter",
+    "reduce",
+    "performance"
+  ],
+  "license": "Apache-2.0",
+  "author": "Tonio Loewald",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tonioloewald/wobbly.git"
+  },
+  "homepage": "https://github.com/tonioloewald/wobbly#readme",
+  "bugs": {
+    "url": "https://github.com/tonioloewald/wobbly/issues"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write .",
+    "pack": "bun test && bun run typecheck && bun build index.ts --sourcemap=linked --minify --outdir=dist && bunx tsc index.ts --declaration --emitDeclarationOnly --outDir dist --skipLibCheck && bun run show-size",
+    "show-size": "gzip -9 -k dist/index.js && ls -lh dist/index.js.gz && rm dist/index.js.gz",
+    "prepublishOnly": "bun run pack"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "prettier": "2.8.8",
     "typescript": "^5"
   }
 }
