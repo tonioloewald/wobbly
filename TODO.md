@@ -102,6 +102,23 @@ Cost: the callback can no longer be an arbitrary JS closure — it has to be exp
 kernel. That's a different (narrower, faster) product than today's `AsyncArray`, so it likely wants
 to be an _additional_ path, not a replacement.
 
+## For the tile-generation demo (tjs-lang#18)
+
+0.4.0 made this shape work well (24 tiles: 9.2ms blocking → ~1.1ms/frame off-thread, first tiles at
+0.5ms). Two things still cost more than they should:
+
+- **Context is re-sent and re-parsed on every message.** We now cache the compiled _callback_ per
+  worker, but `withContext` is still `JSON.stringify`d on the main thread and `JSON.parse`d in the
+  worker **per chunk, per dispatch**. Seeded noise is the worst case: a permutation table is a few
+  hundred numbers that never change, and at 60fps × N workers we re-serialize it every frame. Want
+  an _init-once_ per-worker context — send it when the worker is claimed (or hash it and skip the
+  resend when unchanged), not with every chunk.
+- **A dispatch is a barrier, not a queue.** Each `map` claims workers, fans out, and gives them
+  back. A steady 60fps stream of small jobs pays that setup every frame, which is why 24 small
+  tiles scale ~4×, not ~10× — fixed per-dispatch cost dominates when the work per chunk is ~1ms.
+  A persistent job queue (submit tiles, workers pull) would suit a render loop better than
+  batch-per-frame. Only worth building if the demo actually wants it — `onPartial` may be enough.
+
 ## Known gaps
 
 - **Objects still pay structured clone.** The TypedArray path (0.3.0) fixed numeric data, but an
