@@ -3,6 +3,28 @@
 All notable changes to this project are documented here, in
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
+## [0.3.0] — 2026-07-13
+
+### Added
+
+- **TypedArray fast path — the copy cost essentially disappears.** A plain `Array` of numbers is
+  structured-cloned into the worker element by element (~227ms for 10M numbers, which was
+  effectively _all_ of wobbly's overhead). A `TypedArray` is now **transferred** instead — a
+  pointer move, ~0ms — automatically, with no flag.
+
+  This inverts the library's worst case. A trivial predicate over 10M floats used to be **3× slower
+  than serial**; as a `Float64Array` it is now **1.6× faster** (74ms → 47ms). The heavy case
+  improves too: 3557ms → 552ms (**6.4×**).
+
+  `filter` returns the same container type it was given (safe — the survivors are input elements).
+  The caller's array is never detached: each chunk is sliced before it is transferred.
+
+- `map(fn, { into: Float64Array })` writes results into a TypedArray so they can be transferred
+  back rather than cloned. It is opt-in because `TypedArray.prototype.map` coerces results into the
+  input's element type — mapping an `Int32Array` with `n => n / 2` would silently truncate `0.5`
+  to `0`. Without `into`, `map` over a TypedArray gives a plain array and nothing is truncated.
+- Types: `NumericArray`, `NumericArrayConstructor`, `MapOptions`.
+
 ## [0.2.0] — 2026-07-13
 
 ### Added
@@ -69,5 +91,6 @@ First published release, as `wobbly-js` on npm (the bare name `wobbly` is taken)
 - Noted that floating-point addition is not truly associative, so a parallel sum is not
   bit-identical to a serial one.
 
+[0.3.0]: https://github.com/tonioloewald/wobbly/releases/tag/v0.3.0
 [0.2.0]: https://github.com/tonioloewald/wobbly/releases/tag/v0.2.0
 [0.1.0]: https://github.com/tonioloewald/wobbly/releases/tag/v0.1.0

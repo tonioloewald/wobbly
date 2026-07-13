@@ -100,6 +100,26 @@ Workers call `data.reduce(processItem, undefined)` — no seed — so the accumu
 Because an empty chunk would reduce to `undefined` and poison the merge, `dispatch()` never hands a
 worker an empty chunk: it clamps the worker count to the array length and releases the rest.
 
+### TypedArrays are the fast path — and the transfer rules that make it safe
+
+A plain `Array` of numbers is structured-cloned into the worker element by element: ~227ms for 10M
+numbers, which was effectively _all_ of wobbly's overhead. A `TypedArray` chunk is **transferred**
+(~0ms). `dispatch()` switches on `isNumericArray(source)` automatically.
+
+Three invariants hold this together — break any one and it's a nasty bug:
+
+- **Slice before you transfer.** `dispatch()` transfers `source.slice(...)`, never the caller's own
+  buffer. Transferring the caller's array would **detach** it — their data would vanish mid-call.
+  The test `transferring chunks does not detach the caller array` pins this.
+- **`filter` may keep the container type; `map` may not.** `TypedArray.prototype.filter` returns
+  the input's type, which is safe (survivors are input elements, nothing is coerced).
+  `TypedArray.prototype.map` _also_ returns the input's type, which is **not** safe — it coerces
+  every result as it goes, so mapping an `Int32Array` with `n => n / 2` silently truncates `0.5` to
+  `0`. The worker therefore never calls `.map()` on a TypedArray; it builds a plain array by hand
+  unless the caller opted in via `MapOptions.into`.
+- **Typed chunks reassemble with `set()`, not `flat()`.** See the `isNumericArray(results[0])`
+  branch in `dispatch()`.
+
 ### Progress is automatic
 
 `dispatch()` passes `reportProgress` to the worker only when the caller supplied a progress

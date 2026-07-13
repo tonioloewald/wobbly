@@ -61,6 +61,14 @@ export interface ReduceOptions<U> extends OperationOptions {
   combine?: WobblyCombiner<U>
 }
 
+export interface MapOptions extends OperationOptions {
+  /**
+   * Write results into this TypedArray type, so they can be **transferred**
+   * back from the worker rather than cloned. See `AsyncArray.map`.
+   */
+  into?: NumericArrayConstructor
+}
+
 export interface AsyncArrayOptions {
   /**
    * How many workers a single operation may claim.
@@ -73,12 +81,37 @@ export interface AsyncArrayOptions {
   workers?: number
 }
 
+/**
+ * A numeric TypedArray. `BigInt64Array`/`BigUint64Array` are excluded: their
+ * elements are `bigint`, which doesn't mix with the numeric callbacks here.
+ */
+export type NumericArray =
+  | Float64Array
+  | Float32Array
+  | Int32Array
+  | Uint32Array
+  | Int16Array
+  | Uint16Array
+  | Int8Array
+  | Uint8Array
+  | Uint8ClampedArray
+
+/** Constructor of a `NumericArray`, for `MapOptions.into`. */
+export type NumericArrayConstructor = {
+  new (length: number): NumericArray
+  readonly name: string
+}
+
+function isNumericArray(value: unknown): value is NumericArray {
+  return ArrayBuffer.isView(value) && !(value instanceof DataView)
+}
+
 type OperationType = 'map' | 'forEach' | 'filter' | 'reduce'
 
 /** The message sent from the main thread to a worker. */
 interface WorkerMessage<T> {
   type: OperationType
-  data: T[]
+  data: T[] | NumericArray
   /** The callback, serialized via `Function.prototype.toString`. */
   fn: string
   /** The `withContext` object, serialized via `JSON.stringify`. */
@@ -86,6 +119,12 @@ interface WorkerMessage<T> {
   workerIndex: number
   /** Only count and post progress when the caller actually wants it. */
   reportProgress: boolean
+  /**
+   * For `map` over a TypedArray: the name of the TypedArray constructor to
+   * write results into, so the result can be transferred back instead of
+   * structured-cloned. `null` means "give me a plain array".
+   */
+  into: string | null
 }
 
 /** The message received from a worker. */
@@ -99,7 +138,7 @@ interface WorkerResult<U> {
 
 const workerScript = `
   self.onmessage = (event) => {
-    const { type, data, fn, context, workerIndex, reportProgress } = event.data;
+    const { type, data, fn, context, workerIndex, reportProgress, into } = event.data;
 
     try {
       const contextObj = JSON.parse(context);
@@ -130,9 +169,32 @@ const workerScript = `
       let result;
       switch (type) {
         case 'map':
-          result = data.map(processItem);
+          if (into) {
+            // Write straight into a TypedArray so the result can be
+            // transferred back rather than cloned element by element.
+            const Ctor = self[into];
+            const out = new Ctor(data.length);
+            for (let i = 0; i < data.length; i++) {
+              out[i] = processItem(data[i], i, data);
+            }
+            result = out;
+          } else if (ArrayBuffer.isView(data)) {
+            // NOT data.map(): TypedArray.prototype.map returns the input's own
+            // type, coercing every result as it goes — mapping an Int32Array
+            // with n => n / 2 would silently truncate 0.5 to 0. Build a plain
+            // array so only an explicit 'into' ever coerces.
+            const out = new Array(data.length);
+            for (let i = 0; i < data.length; i++) {
+              out[i] = processItem(data[i], i, data);
+            }
+            result = out;
+          } else {
+            result = data.map(processItem);
+          }
           break;
         case 'filter':
+          // TypedArray.filter keeps the input's type, which is exactly right:
+          // the survivors are input elements, so nothing is coerced.
           result = data.filter(processItem);
           break;
         case 'reduce':
@@ -145,7 +207,8 @@ const workerScript = `
         default:
           throw new Error('unknown operation type: ' + type);
       }
-      self.postMessage({ type: 'result', result, workerIndex });
+      const transfer = ArrayBuffer.isView(result) ? [result.buffer] : [];
+      self.postMessage({ type: 'result', result, workerIndex }, transfer);
     } catch (e) {
       self.postMessage({
         type: 'result',
@@ -256,18 +319,23 @@ function replaceWorkers(workers: Worker[]): void {
  * **no closure**. Anything a callback needs from the enclosing scope must be
  * passed via `withContext()`, which becomes the callback's `this`.
  */
-export class AsyncArray<T> {
-  private readonly array: T[]
+export class AsyncArray<T, C extends ArrayLike<T> = T[]> {
+  private readonly array: C
   private readonly workerCount: number | undefined
   private serializedContext = '{}'
 
-  constructor(array: T[], options: AsyncArrayOptions = {}) {
+  // The `& ArrayLike<T>` is load-bearing: without an inference site for `T`,
+  // TypeScript infers it as `unknown` and every callback parameter goes untyped.
+  constructor(array: C & ArrayLike<T>, options: AsyncArrayOptions = {}) {
     this.array = array
     this.workerCount = options.workers
   }
 
-  private derive(serializedContext: string, workers?: number): AsyncArray<T> {
-    const next = new AsyncArray<T>(this.array, {
+  private derive(
+    serializedContext: string,
+    workers?: number
+  ): AsyncArray<T, C> {
+    const next = new AsyncArray<T, C>(this.array, {
       workers: workers ?? this.workerCount,
     })
     next.serializedContext = serializedContext
@@ -284,7 +352,7 @@ export class AsyncArray<T> {
    *
    * @param context a serializable object
    */
-  public withContext(context: object): AsyncArray<T> {
+  public withContext(context: object): AsyncArray<T, C> {
     return this.derive(JSON.stringify(context))
   }
 
@@ -292,7 +360,7 @@ export class AsyncArray<T> {
    * Returns a *new* `AsyncArray` that claims `workers` workers per operation,
    * instead of the default half-pool. See `AsyncArrayOptions.workers`.
    */
-  public withWorkers(workers: number): AsyncArray<T> {
+  public withWorkers(workers: number): AsyncArray<T, C> {
     return this.derive(this.serializedContext, workers)
   }
 
@@ -303,37 +371,52 @@ export class AsyncArray<T> {
   private async dispatch<U>(
     type: OperationType,
     fn: Function,
-    options: ReduceOptions<U> = {}
-  ): Promise<U[] | U | void> {
-    const { onProgress, combine, signal } = options
+    options: ReduceOptions<U> & { into?: NumericArrayConstructor } = {}
+  ): Promise<U[] | U | NumericArray | void> {
+    const { onProgress, combine, signal, into } = options
+    const source = this.array as unknown as
+      | (T[] & { slice(a: number, b: number): T[] })
+      | NumericArray
+    // A TypedArray input is the fast path: its chunks are transferred rather
+    // than structured-cloned, which is the difference between ~227ms and ~0ms
+    // for 10M numbers.
+    const typedInput = isNumericArray(source)
 
     signal?.throwIfAborted()
 
-    if (this.array.length === 0) {
+    if (source.length === 0) {
       if (onProgress) onProgress(1)
       if (type === 'reduce') {
         // Match Array.prototype.reduce rather than quietly resolving to
         // `undefined`, which the `Promise<U>` return type would be lying about.
         throw new TypeError('reduce of empty array with no initial value')
       }
-      return type === 'map' || type === 'filter' ? [] : undefined
+      if (type === 'forEach') return undefined
+      // Preserve the container type: filtering an empty Float64Array should
+      // give back an empty Float64Array, not [].
+      if (typedInput && (type === 'filter' || into !== undefined)) {
+        const Ctor = (into ??
+          (source as NumericArray)
+            .constructor) as unknown as NumericArrayConstructor
+        return new Ctor(0)
+      }
+      return []
     }
 
     const claimed = await claimWorkers(this.workerCount)
     // Never hand a worker an empty chunk: an empty `reduce` yields `undefined`,
     // which would then poison the final combining pass.
-    const workers = claimed.slice(
-      0,
-      Math.min(claimed.length, this.array.length)
-    )
+    const workers = claimed.slice(0, Math.min(claimed.length, source.length))
     releaseWorkers(claimed.slice(workers.length))
 
     const serializedFn = fn.toString()
     const reportProgress = onProgress !== undefined
 
     return new Promise((resolve, reject) => {
-      const chunkSize = Math.ceil(this.array.length / workers.length)
-      const results: (U[] | U | void)[] = new Array(workers.length)
+      const chunkSize = Math.ceil(source.length / workers.length)
+      const results: (U[] | U | NumericArray | void)[] = new Array(
+        workers.length
+      )
       const workerProgress: number[] = new Array(workers.length).fill(0)
       let receivedCount = 0
       let lastReportedProgress = 0
@@ -405,7 +488,23 @@ export class AsyncArray<T> {
         releaseWorkers(workers)
 
         if (type === 'map' || type === 'filter') {
-          resolve((results as U[][]).flat())
+          // Typed chunks come back as TypedArrays (transferred, not cloned), so
+          // they concatenate with set() into one buffer rather than flat().
+          if (isNumericArray(results[0])) {
+            const chunks = results as NumericArray[]
+            const total = chunks.reduce((n, chunk) => n + chunk.length, 0)
+            const Ctor = chunks[0]!
+              .constructor as unknown as NumericArrayConstructor
+            const merged = new Ctor(total)
+            let offset = 0
+            for (const chunk of chunks) {
+              merged.set(chunk as any, offset)
+              offset += chunk.length
+            }
+            resolve(merged)
+          } else {
+            resolve((results as U[][]).flat())
+          }
         } else if (type === 'reduce') {
           // Second tier: merge the per-worker partials on the main thread.
           const partials = results as U[]
@@ -440,19 +539,41 @@ export class AsyncArray<T> {
         worker.addEventListener('message', onMessage)
         worker.addEventListener('error', onError)
 
+        // slice() on a TypedArray gives a chunk that owns its buffer, so it is
+        // ours to transfer — the caller's array is never detached.
+        const chunk = source.slice(index * chunkSize, (index + 1) * chunkSize)
+
         const message: WorkerMessage<T> = {
           type,
-          data: this.array.slice(index * chunkSize, (index + 1) * chunkSize),
+          data: chunk,
           fn: serializedFn,
           context: this.serializedContext,
           workerIndex: index,
           reportProgress,
+          into: into?.name ?? null,
         }
-        worker.postMessage(message)
+        worker.postMessage(message, isNumericArray(chunk) ? [chunk.buffer] : [])
       })
     })
   }
 
+  /**
+   * Maps into a **TypedArray**, which can be transferred back from the worker
+   * instead of cloned element by element. Only meaningful when the input is a
+   * TypedArray too; the callback must return numbers.
+   *
+   * ```js
+   * await new AsyncArray(floats).map(fn, { into: Float64Array })
+   * ```
+   *
+   * Values are coerced to the element type, so mapping into an `Int32Array`
+   * truncates. That is why it is opt-in: without `into`, a `map` over a
+   * TypedArray gives you a plain array and nothing is silently truncated.
+   */
+  public async map(
+    fn: WobblyCallback<T, number>,
+    options: MapOptions & { into: NumericArrayConstructor }
+  ): Promise<NumericArray>
   /**
    * @param fn the mapping callback — runs in a worker, so it has no closure
    * @param options `onProgress` and/or an abort `signal`; passing a bare
@@ -461,11 +582,22 @@ export class AsyncArray<T> {
   public async map<U>(
     fn: WobblyCallback<T, U>,
     options?: OperationOptions | ((progress: number) => void)
-  ): Promise<U[]> {
-    return (await this.dispatch<U>('map', fn, normalize(options))) as U[]
+  ): Promise<U[]>
+  public async map<U>(
+    fn: WobblyCallback<T, U>,
+    options?: MapOptions | ((progress: number) => void)
+  ): Promise<U[] | NumericArray> {
+    const opts = normalize<U>(options) as ReduceOptions<U> & {
+      into?: NumericArrayConstructor
+    }
+    return (await this.dispatch<U>('map', fn, opts)) as U[] | NumericArray
   }
 
   /**
+   * Resolves to the same kind of container it was given: an array in, an array
+   * out; a `Float64Array` in, a `Float64Array` out. Nothing is coerced — the
+   * survivors are input elements.
+   *
    * @param fn the filtering predicate — runs in a worker, so it has no closure
    * @param options `onProgress` and/or an abort `signal`; passing a bare
    *   function is shorthand for `{ onProgress }`
@@ -473,8 +605,12 @@ export class AsyncArray<T> {
   public async filter(
     fn: WobblyCallback<T, boolean>,
     options?: OperationOptions | ((progress: number) => void)
-  ): Promise<T[]> {
-    return (await this.dispatch<T>('filter', fn, normalize(options))) as T[]
+  ): Promise<C> {
+    return (await this.dispatch<T>(
+      'filter',
+      fn,
+      normalize(options)
+    )) as unknown as C
   }
 
   /**

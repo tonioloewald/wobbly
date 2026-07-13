@@ -363,6 +363,68 @@ test('withWorkers survives withContext and vice versa', async () => {
   ).toEqual([6, 7, 8])
 })
 
+test('filter over a TypedArray returns the same TypedArray type', async () => {
+  const source = Float64Array.from({ length: 1e5 }, (_, i) => i)
+  const expected = source.filter((n) => n % 3 === 0)
+
+  const result = await new AsyncArray(source).filter((n: number) => n % 3 === 0)
+
+  expect(result).toBeInstanceOf(Float64Array)
+  expect(result).toEqual(expected)
+})
+
+test('transferring chunks does not detach the caller array', async () => {
+  // The classic transferables bug: hand the caller's own buffer to a worker and
+  // it is detached out from under them. We slice first, so it must survive.
+  const source = Float64Array.from({ length: 1000 }, (_, i) => i)
+
+  await new AsyncArray(source).filter((n: number) => n > 500)
+
+  expect(source.length).toBe(1000)
+  expect(source[999]).toBe(999)
+  expect(source.buffer.byteLength).toBeGreaterThan(0)
+  // And it is still usable a second time.
+  expect(await new AsyncArray(source).filter((n: number) => n > 998)).toEqual(
+    Float64Array.from([999])
+  )
+})
+
+test('map over a TypedArray gives a plain array unless `into` is given', async () => {
+  const source = Int32Array.from([1, 2, 3])
+
+  // No `into`: results are NOT coerced back to the input element type, so a
+  // fractional result survives instead of being silently truncated to 0.
+  const plain = await new AsyncArray(source).map((n: number) => n / 2)
+  expect(Array.isArray(plain)).toBe(true)
+  expect(plain).toEqual([0.5, 1, 1.5])
+
+  // With `into`, results are written into a TypedArray and transferred back.
+  const typed = await new AsyncArray(source).map((n: number) => n * 2, {
+    into: Float64Array,
+  })
+  expect(typed).toBeInstanceOf(Float64Array)
+  expect(typed).toEqual(Float64Array.from([2, 4, 6]))
+})
+
+test('reduce and forEach work over a TypedArray', async () => {
+  const source = Float64Array.from({ length: 1e4 }, (_, i) => i)
+
+  const sum = await new AsyncArray(source).reduce(
+    (acc: number = 0, n: number) => acc + n
+  )
+  expect(sum).toBeCloseTo((9999 * 1e4) / 2, 2)
+  expect(await new AsyncArray(source).forEach(() => {})).toBeUndefined()
+})
+
+test('an empty TypedArray filters to an empty TypedArray', async () => {
+  const result = await new AsyncArray(new Float64Array(0)).filter(
+    (n: number) => n > 0
+  )
+
+  expect(result).toBeInstanceOf(Float64Array)
+  expect(result.length).toBe(0)
+})
+
 test('the pool survives a failed operation', async () => {
   const boom = new AsyncArray([1, 2, 3])
   await boom

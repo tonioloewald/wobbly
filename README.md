@@ -16,19 +16,30 @@ bun add wobbly-js   # or: npm install wobbly-js
 
 ## Does this actually make things faster?
 
-**Only when the work per item is heavy enough to pay for moving the data.** Every item is copied into a worker and every result is copied back, so wobbly trades memory bandwidth for CPU. When the callback is cheap, that trade is a loss — and it can be a big one.
+**Yes — and how much depends almost entirely on whether you hand it a `TypedArray`.**
 
-Measured on a 10-core M-series Mac (so ~5 workers — see [Worker pool](#worker-pool)):
+Every item has to reach the worker somehow. A plain `Array` of numbers is copied by
+[structured clone](https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API/Structured_clone_algorithm),
+element by element: for 10M numbers that alone costs **~227ms**. The same data as a `Float64Array`
+is handed over by [transfer](https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API/Transferable_objects)
+— a pointer move — in **~0ms**. wobbly does this automatically when the input is a TypedArray.
 
-| Workload                                     | Serial | With wobbly |                 |
-| -------------------------------------------- | ------ | ----------- | --------------- |
-| Primality of 100k integers near 1e12 (heavy) | 3562ms | **757ms**   | **4.7× faster** |
-| Primality of 1M integers near 1e9 (heavy)    | 1582ms | **279ms**   | **5.7× faster** |
-| Trivial predicate over 10M random floats     | 20ms   | 211ms       | **11× slower**  |
+Measured on a 10-core M-series Mac:
 
-That last row is the trap. A cheap callback over a huge array is the _worst_ case for wobbly: there is no work to spread, and you pay the copying anyway. Reach for wobbly when a single pass is janking your main thread — not merely because an array is big.
+| Workload                                         | Serial | wobbly (`Array`) | wobbly (`Float64Array`) |
+| ------------------------------------------------ | ------ | ---------------- | ----------------------- |
+| **Heavy** — primality of 100k integers near 1e12 | 3557ms | 767ms (4.6×)     | **552ms (6.4×)**        |
+| **Trivial** — `n > 0.5` over 10M floats          | 74ms   | 238ms (0.3× 🐌)  | **47ms (1.6×)**         |
 
-An operation claims half the pool by default so that concurrent operations don't block each other. If one operation is all you're running, `.withWorkers(10)` takes every core and the first row goes from 757ms to **521ms — 6.8× faster** than serial.
+The bottom-left cell is the classic worker trap: a cheap callback over a big plain array, where
+you pay to copy 10M numbers and get no work to spread in return. **With a `TypedArray` that trap
+disappears** — even a trivial predicate comes out ahead, because there's nothing left to pay.
+
+So: if your data is numeric, keep it in a `TypedArray` and wobbly is close to free. If it's an
+array of objects, it must be cloned, and you need genuinely heavy per-item work to come out ahead.
+
+(The heavy row's `Array` column uses the default half-pool; the `Float64Array` column adds
+`.withWorkers(10)` to take every core. See [Worker pool](#worker-pool).)
 
 ## Quick start
 
@@ -88,6 +99,45 @@ Array items are copied by
 [structured clone](https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API/Structured_clone_algorithm),
 so they must be cloneable too: plain objects, numbers, strings and the like — not DOM nodes, not
 functions.
+
+## TypedArrays are the fast path
+
+If your data is numeric, hand wobbly a `TypedArray` and the copy cost essentially vanishes. There's
+no flag to set — it's automatic:
+
+```js
+const data = Float64Array.from(readings)
+
+const loud = await new AsyncArray(data).filter((n) => n > threshold)
+//    ^ a Float64Array. Filter preserves the container type.
+```
+
+Chunks are **transferred** to the workers rather than cloned, and results are transferred back.
+Your array is never detached — wobbly slices off its own copy of each chunk first, so the array you
+passed in is still there and still usable afterwards.
+
+`filter` gives you back the same TypedArray type it was given, which is safe: the survivors are
+input elements, so nothing is converted.
+
+`map` is the one place you have to choose. By default it returns a **plain array**:
+
+```js
+const halves = await new AsyncArray(Int32Array.from([1, 2, 3])).map(
+  (n) => n / 2
+)
+// [0.5, 1, 1.5] — a plain array
+```
+
+That's deliberate. `TypedArray.prototype.map` would coerce every result back into the input's
+element type, so `1 / 2` in an `Int32Array` would silently become `0`. If you want the result
+transferred back as a TypedArray — and you accept the coercion — say so with `into`:
+
+```js
+const doubled = await new AsyncArray(data).map((n) => n * 2, {
+  into: Float64Array,
+})
+//    ^ a Float64Array, transferred, not cloned
+```
 
 ## Reduce: read this before you use it
 

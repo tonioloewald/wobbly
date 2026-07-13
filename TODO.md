@@ -65,7 +65,27 @@ here with the URL. Not before.
 
 ### 5. Send WASM across the membrane
 
-The most promising escape, because it sidesteps eval by construction:
+**Now tracked upstream as [tjs-lang#18](https://github.com/tonioloewald/tjs-lang/issues/18)**,
+which proposes exactly the right layering — tjs-lang emits a thread-agnostic, eval-free,
+batch-shaped WASM kernel; **wobbly turns any such kernel into a worker pool**. Our side of that
+bargain:
+
+- ✅ **Blob spawn / cross-origin worker** — done, and per that issue it's "the hard part".
+- ✅ **Batch-shaped data path** (its gap 5) — done in 0.3.0. Transferred TypedArray chunks, one
+  boundary crossing per chunk rather than per item.
+- ⬜ **Run a `WebAssembly.Module` with no JS callback.** This is the actual carveout. It needs the
+  issue's gap 2 (expose the compiled Module — it's structured-cloneable, so we can `postMessage` it
+  to N workers and each instantiates cheaply) and gap 6 (self-describing exports, so a _generic_
+  pool can call the kernel without shipping a closure). If calling a kernel still needs
+  `new Function()`, the CSP win evaporates — that's the whole point.
+- ⬜ Worth knowing (its gap 3): sync `new WebAssembly.Module(bytes)` is blocked above 4KB on the
+  main thread but **allowed in workers**, so a worker can hydrate a kernel with no async at all.
+
+The API shape to design once gaps 2/6 land — something like
+`new AsyncArray(f64).mapKernel(module, 'exportName')`, which would need **no eval, no closure, and
+no `unsafe-eval`**.
+
+The rest of the original reasoning, still valid:
 
 - **`WebAssembly.Module` is structured-cloneable.** You can `postMessage` a _compiled_ module
   straight to a worker. No string, no eval, no serialization of source.
@@ -84,10 +104,10 @@ to be an _additional_ path, not a replacement.
 
 ## Known gaps
 
-- **No transferables / TypedArray fast path.** Everything goes through structured clone, so peak
-  memory is ~2× and the copy dominates for cheap callbacks — it is what makes the "11× slower" row
-  in the README's table. This is the single biggest lever on performance. See item 5; they
-  converge, since a WASM kernel over a `TypedArray` is exactly the zero-copy path.
+- **Objects still pay structured clone.** The TypedArray path (0.3.0) fixed numeric data, but an
+  array of objects is still cloned element by element. There is no fix within `postMessage`
+  semantics — the realistic answer is to tell people to keep numeric data in TypedArrays, which
+  the README now does.
 - **`docs/` / doc site.** There isn't one, by choice — `README.md` plus a hand-maintained
   `llms.txt` is proportionate for one class. Revisit if the API grows. Note `llms.txt` is **not**
   generated here (the rest of the ecosystem emits it from `tosijs-ui/site`), so it has to be
@@ -96,8 +116,14 @@ to be an _additional_ path, not a replacement.
   (`prepublishOnly` rebuilds), but `bun add tonioloewald/wobbly` straight from git yields no
   `dist`. Add a `prepare` script if that ever matters.
 
-### Done in 0.2.0
+### Done
 
-- ~~Cancellation~~ — `AbortSignal` on every operation.
-- ~~Configurable worker count~~ — `{ workers }` / `.withWorkers(n)`, plus `configureWorkerPool()`
-  and `terminateWorkerPool()`.
+- ~~Cancellation~~ (0.2.0) — `AbortSignal` on every operation.
+- ~~Configurable worker count~~ (0.2.0) — `{ workers }` / `.withWorkers(n)`, plus
+  `configureWorkerPool()` and `terminateWorkerPool()`.
+- ~~Transferables / TypedArray fast path~~ (0.3.0) — chunks of a `TypedArray` are transferred, not
+  cloned. This was the single biggest lever: the structured clone of 10M numbers cost ~227ms and
+  was effectively _all_ of wobbly's overhead. The trivial-callback case went from 3× slower than
+  serial to 1.6× faster. **This is also the prerequisite for the WASM carveout below** — gap 5 of
+  [tjs-lang#18](https://github.com/tonioloewald/tjs-lang/issues/18) asks for a batch-shaped data
+  path, and without transferables a perfect WASM kernel would have been starved by our copy.

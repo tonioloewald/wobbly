@@ -1,4 +1,4 @@
-# wobbly v0.2.0
+# wobbly v0.3.0
 
 Parallelize `map`, `filter`, `reduce`, and `forEach` over large arrays using Web Workers.
 No worker file to build or serve. ~2kB gzipped, zero dependencies.
@@ -77,19 +77,20 @@ a serial one (~1e-9 relative). Don't parallelize a reduce that must be bit-exact
 import { AsyncArray } from 'wobbly-js'
 ```
 
-`new AsyncArray(array, options?)` — `options: { workers?: number }`
+`new AsyncArray(arrayOrTypedArray, options?)` — `options: { workers?: number }`
 
 | Method | Resolves to |
 | --- | --- |
-| `map(fn, options?)` | new array of results, in input order |
-| `filter(fn, options?)` | matching items, in input order |
+| `map(fn, options?)` | plain array of results, in input order (`{ into: Float64Array }` → TypedArray) |
+| `filter(fn, options?)` | matching items — **same container type as the input** |
 | `reduce(fn, options?)` | the reduced value (see above) |
 | `forEach(fn, options?)` | `undefined` |
 | `withContext(obj)` | a **new** `AsyncArray` binding `obj` as the callback's `this` |
 | `withWorkers(n)` | a **new** `AsyncArray` claiming `n` workers per operation |
 
-`options` is `{ onProgress?, signal? }` (plus `combine?` for `reduce`), or a bare function as
-shorthand for `{ onProgress }`. `withContext` and `withWorkers` do not mutate the receiver.
+`options` is `{ onProgress?, signal? }`, plus `combine?` for `reduce` and `into?` for `map`; a bare
+function is shorthand for `{ onProgress }`. `withContext` and `withWorkers` do not mutate the
+receiver.
 
 Module functions: `configureWorkerPool({ size })` (before first use) and `terminateWorkerPool()`.
 Types: `WobblyContext`, `WobblyCallback`, `WobblyReducer`, `WobblyCombiner`, `OperationOptions`,
@@ -118,16 +119,40 @@ The work really stops; side effects already performed inside those workers stand
 
 A callback that throws in a worker **rejects** the promise; the workers are replaced.
 
+## TypedArrays are the fast path — use one if your data is numeric
+
+A plain `Array` of numbers is structured-cloned into the worker element by element (~227ms for
+10M). A `TypedArray` is **transferred** — a pointer move, ~0ms. wobbly does this automatically;
+there is no flag.
+
+```js
+const out = await new AsyncArray(Float64Array.from(xs)).filter((n) => n > 0.5)
+// out is a Float64Array — filter preserves the container type
+```
+
+Your array is not detached: wobbly slices its own copy of each chunk before transferring.
+
+`map` over a TypedArray returns a **plain array** by default, because `TypedArray.map` would coerce
+results back into the input's element type (mapping an `Int32Array` with `n => n / 2` would
+silently truncate `0.5` to `0`). Opt into a transferred typed result — and its coercion — with
+`into`:
+
+```js
+await new AsyncArray(f64).map((n) => n * 2, { into: Float64Array }) // Float64Array
+```
+
 ## When to use it — and when not to
 
-Only worth it when per-item work is heavy enough to pay for copying the data in and out.
-Measured on 10 cores (an operation claims half the pool by default, so ~5 workers):
+Measured on 10 cores:
 
-- Primality of 100k integers near 1e12: 3562ms → 757ms (**4.7× faster**)
-- Trivial predicate over 10M random floats: 20ms → 211ms (**11× slower**)
+| Workload | Serial | wobbly (Array) | wobbly (Float64Array) |
+| --- | --- | --- | --- |
+| Primality, 100k ints near 1e12 | 3557ms | 767ms (4.6×) | **552ms (6.4×)** |
+| `n > 0.5` over 10M floats | 74ms | 238ms (0.3× — slower!) | **47ms (1.6×)** |
 
-A cheap callback over a huge array is the worst case. Reach for wobbly when a pass is janking the
-main thread, not merely because an array is big.
+A cheap callback over a big **plain** array is the worst case: you pay to copy and have no work to
+spread. With a TypedArray that trap disappears. If your items are objects they must be cloned, so
+you need genuinely heavy per-item work to win.
 
 ## Limits
 
@@ -136,5 +161,5 @@ main thread, not merely because an array is big.
   or serve.
 - **Browser or Bun only.** Node has `worker_threads`, not the web `Worker` global.
 - `forEach` runs in a worker with no DOM and no access to main-thread state.
-- The whole array is copied (structured clone), so peak memory is roughly double. No transferables
-  or TypedArray fast path yet.
+- A plain `Array` is copied (structured clone), so peak memory is roughly double. A `TypedArray` is
+  transferred instead, which is both zero-copy and the fast path.
