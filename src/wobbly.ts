@@ -552,19 +552,30 @@ export class AsyncArray<T, C extends ArrayLike<T> = T[]> {
     // Shared memory is the *no*-copy path: workers view the caller's own buffer
     // and work in place. Nothing is copied in either direction.
     const sharedInput = isShared(source)
-    const sharedOut = type === 'map' && isShared(out) ? out : undefined
+    // `out` is a *hint*, never a requirement. If both sides are shared, workers
+    // write into it in place (zero copy). If not — an ordinary host, no
+    // cross-origin isolation — we still honour it by filling it from the
+    // transferred results. Same code deploys everywhere; it is merely faster
+    // where shared memory exists. Making `out` throw off the fast path would
+    // push exactly the deployment branch onto callers that wobbly exists to
+    // spare them. — raised by tosijs-3d, NOTES-FROM-TOSIJS-3D.md §7
+    const sharedOut =
+      type === 'map' && sharedInput && isShared(out) ? out : undefined
 
-    if (out !== undefined && !sharedInput) {
-      throw new TypeError(
-        'wobbly: `out` requires a SharedArrayBuffer-backed input — without ' +
-          'shared memory there is nothing for the workers to write into'
-      )
-    }
-    if (sharedOut !== undefined && sharedOut.length < source.length) {
+    if (out !== undefined && out.length < source.length) {
       throw new RangeError(
-        `wobbly: \`out\` is too small (${sharedOut.length} < ${source.length})`
+        `wobbly: \`out\` is too small (${out.length} < ${source.length})`
       )
     }
+
+    // An unshared `out` still tells us the element type the caller wants, so
+    // have the workers write typed chunks (transferred back, not cloned) rather
+    // than plain arrays. They consented to the coercion by supplying `out`.
+    const effectiveInto =
+      into ??
+      (type === 'map' && out !== undefined && sharedOut === undefined
+        ? (out.constructor as unknown as NumericArrayConstructor)
+        : undefined)
 
     signal?.throwIfAborted()
 
@@ -695,6 +706,23 @@ export class AsyncArray<T, C extends ArrayLike<T> = T[]> {
           return
         }
 
+        // `out` given, but shared memory wasn't available: honour it anyway by
+        // filling it from the results. Slower than in-place, but the caller's
+        // code is identical — and they still get their own reusable buffer back
+        // instead of a fresh allocation.
+        if (type === 'map' && out !== undefined) {
+          let offset = 0
+          for (const chunk of results as (NumericArray | U[])[]) {
+            const values = chunk as ArrayLike<number>
+            for (let i = 0; i < values.length; i++) {
+              out[offset + i] = values[i]!
+            }
+            offset += values.length
+          }
+          resolve(out)
+          return
+        }
+
         if (type === 'map' || type === 'filter') {
           // Typed chunks come back as TypedArrays (transferred, not cloned), so
           // they concatenate with set() into one buffer rather than flat().
@@ -766,7 +794,7 @@ export class AsyncArray<T, C extends ArrayLike<T> = T[]> {
           context: this.serializedContext,
           workerIndex: index,
           reportProgress,
-          into: into?.name ?? null,
+          into: effectiveInto?.name ?? null,
           sharedIn: sharedInput ? (source.buffer as SharedArrayBuffer) : null,
           sharedOut: sharedOut ? (sharedOut.buffer as SharedArrayBuffer) : null,
           viewCtor: sharedInput ? source.constructor.name : null,

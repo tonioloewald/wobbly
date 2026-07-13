@@ -33,6 +33,35 @@ objects, a 10-worker fan-out only pays off if your callback takes more than roug
 — which real work often does (parsing, regex, crypto, geometry), but a cheap field transform never
 will. If you're moving a large object graph just to do something trivial to it, you will lose.
 
+## The best workload: send the recipe, not the data
+
+The table above says the membrane is what costs you. The way to win, then, is to **not send data at
+all.**
+
+A **deterministic generator** — procedural terrain, a noise field, mesh or texture generation, a
+simulation rolled forward from a seed — has a tiny input by construction. You send a _recipe_, and
+the worker generates the data on the other side:
+
+```js
+// in:  a few numbers.  out: a 15KB Float32Array, transferred back.
+const tiles = await new AsyncArray(recipes).map(function buildTile(r) {
+  const out = new Float32Array(r.verts * 3)
+  // …generate from r.seed / r.cx / r.cz…
+  return out
+})
+```
+
+Nothing is copied in — the input is tens of bytes. Nothing is copied out — the result is a
+`TypedArray` and gets transferred. The membrane cost is _zero_, and it stays zero however big the
+output is.
+
+If you're tempted to ship a lookup table (a seeded permutation table, say) as context: **don't. Send
+the seed.** It's a pure function of the seed, so each worker can rebuild it once, in microseconds.
+Shipping the table is shipping a cache of something cheaper to recompute than to transmit.
+
+This class of work is where a worker pays for itself unambiguously — much more reliably than "heavy
+callback over a big array," which, as the benchmarks below show, is a narrower win than it sounds.
+
 ## Does this actually make things faster?
 
 **Yes — and how much depends almost entirely on whether you hand it a `TypedArray`.**
@@ -182,16 +211,29 @@ Measured on 10M `Float64`s with moderate per-item work, 10 workers: serial **313
 **60ms**, shared **51ms**. The remaining copy was ~16% of the parallel time — and on a single worker
 with a cheap callback, where the copy dominates, it's closer to 40%.
 
-**The catch, and it's a real one:** in a browser, `SharedArrayBuffer` requires
-[cross-origin isolation](https://developer.mozilla.org/en-US/docs/Web/API/Window/crossOriginIsolated)
-— the `COOP` and `COEP` response headers. That is server-side setup, which is precisely what wobbly
-otherwise spares you, and it breaks some third-party embeds. So it is strictly opt-in: pass a shared
-array and you get the zero-copy path, pass anything else and you get transfers. Check with
-`sharedMemoryAvailable()`.
+### Most people should not use this
 
-A shared input is **never** transferred — transferring it would detach your own memory. `filter` is
-the one operation that still copies on the way back, because the number of survivors isn't known in
-advance.
+`SharedArrayBuffer` requires
+[cross-origin isolation](https://developer.mozilla.org/en-US/docs/Web/API/Window/crossOriginIsolated)
+— the `COOP` and `COEP` response headers — and that cost is much bigger than it looks:
+
+- **You may not be able to set headers at all.** GitHub Pages, for one, can't.
+- **`COEP` breaks cross-origin embeds** that don't send `CORP`: images, iframes, analytics, third-party
+  scripts.
+- **If you are a library, you cannot demand this of your host application.** Requiring COOP/COEP of
+  someone else's app is a _bigger_ ask than `unsafe-eval`.
+
+So shared memory is for **applications that control their own headers and have genuinely large
+numeric arrays** — DSP, image processing, simulation. If you're shipping a library, or you have a
+few numbers of input and a buffer of output, **use the transfer path instead. It needs nothing, and
+for you it will be just as fast.**
+
+Everything degrades on its own: `out` works whether or not memory is shared (zero-copy when it is,
+filled from transferred results when it isn't), so **the same code deploys everywhere**. You never
+have to branch on `sharedMemoryAvailable()`.
+
+A shared input is never transferred — that would detach your own memory. `filter` still copies on the
+way back, because the survivor count isn't known in advance.
 
 ## Reduce: read this before you use it
 

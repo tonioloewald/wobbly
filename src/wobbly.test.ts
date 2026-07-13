@@ -532,13 +532,35 @@ test('filter and reduce work over shared memory', async () => {
   expect(sum).toBe((999 * 1000) / 2)
 })
 
-test('`out` without a shared input is rejected, not silently ignored', async () => {
-  const plain = Float64Array.from([1, 2, 3])
+test('`out` works without shared memory too — same code, every host', async () => {
+  // The whole point: code written against `out` must not explode when deployed
+  // somewhere that can't do cross-origin isolation. It just isn't zero-copy.
+  const plain = Float64Array.from({ length: 500 }, (_, i) => i)
+  const out = new Float64Array(500) // ordinary, NOT shared
+
+  const result = await new AsyncArray(plain).map((x: number) => x * 4, { out })
+
+  expect(result).toBe(out) // the caller's own buffer, reused
+  expect(out[0]).toBe(0)
+  expect(out[499]).toBe(1996)
+})
+
+test('`out` from a plain array input works as well', async () => {
+  const out = new Float64Array(4)
+  const result = await new AsyncArray([1, 2, 3, 4]).map((n: number) => n * 10, {
+    out,
+  })
+
+  expect(result).toBe(out)
+  expect(Array.from(out)).toEqual([10, 20, 30, 40])
+})
+
+test('`out` that is too small is rejected', async () => {
   expect(
-    new AsyncArray(plain).map((x: number) => x, {
-      out: new Float64Array(new SharedArrayBuffer(24)),
+    new AsyncArray([1, 2, 3]).map((n: number) => n, {
+      out: new Float64Array(2),
     })
-  ).rejects.toThrow('requires a SharedArrayBuffer-backed input')
+  ).rejects.toThrow('too small')
 })
 
 test('the pool survives a failed operation', async () => {

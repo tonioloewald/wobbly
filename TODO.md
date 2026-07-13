@@ -178,24 +178,63 @@ Cost: the callback can no longer be an arbitrary JS closure — it has to be exp
 kernel. That's a different (narrower, faster) product than today's `AsyncArray`, so it likely wants
 to be an _additional_ path, not a replacement.
 
-## For the tile-generation demo (tjs-lang#18)
+## The task pool — what a real consumer actually asked for
 
-0.4.0 made this shape work well (24 tiles: 9.2ms blocking → ~1.1ms/frame off-thread, first tiles at
-0.5ms). Two things still cost more than they should:
+Read [`NOTES-FROM-TOSIJS-3D.md`](./NOTES-FROM-TOSIJS-3D.md) first. It is a correction from the
+horse's mouth, and it says the tile demo I benchmarked models their workload wrong.
 
-- **Context is re-sent and re-parsed on every message.** We now cache the compiled _callback_ per
-  worker, but `withContext` is still `JSON.stringify`d on the main thread and `JSON.parse`d in the
-  worker **per chunk, per dispatch**. Seeded noise is the worst case: a permutation table is a few
-  hundred numbers that never change, and at 60fps × N workers we re-serialize it every frame. Want
-  an _init-once_ per-worker context — send it when the worker is claimed (or hash it and skip the
-  resend when unchanged), not with every chunk.
-- **A dispatch is a barrier, not a queue.** Each `map` claims workers, fans out, and gives them
-  back. A persistent job queue (submit tiles, workers pull) might suit a render loop better than
-  batch-per-frame. **But measure before building it:** a `postMessage` round-trip is only ~20µs, so
-  the dispatch envelope is _not_ the bottleneck — an earlier version of this file claimed it was,
-  and that was wrong. 24 tiles at 1.1ms/frame against a 0.92ms theoretical floor (9.2ms serial ÷ 10
-  workers) is already ~85% of ideal. There is very little left to win here; `onPartial` probably
-  closes the gap that mattered.
+**`AsyncArray.map` is the wrong primitive for a generator.** They don't have an array. Most frames
+they need zero-to-a-few tiles, occasionally a burst. What they want:
+
+```js
+pool.init(config) // once per worker: build the noise from the seed, allocate scratch
+pool.run(recipe) // many times: -> Promise<Float32Array>, transferred back
+```
+
+- **Per-worker resident state.** Today `withContext` is JSON round-tripped _per chunk, per
+  dispatch_. They want it built once, at init, and kept. (Note their better fix to my earlier
+  framing: don't send the permutation table at all - **send the seed** and rebuild it in the worker.
+  I had this backwards.)
+- **No allocation per job** - ping-pong the output buffers back to the worker for reuse.
+- **Job identity**, so a stale result can be _discarded_. They have a floating origin: when the world
+  rebases, every in-flight tile was computed against dead coordinates. `AbortSignal` (0.2.0) helps,
+  but they need to match a result to the request that is still wanted.
+- **Latency is the metric, not throughput.** A tile a frame late is fine; a 16ms hitch is not. In XR
+  a dropped frame is nausea.
+
+**The pool is the primitive worth exposing, and `AsyncArray` should sit on top of it.** That
+generalises to _any_ deterministic generator - the workload class where a worker unambiguously pays.
+
+WARNING: **Do not build this speculatively.** They explicitly say they may not need a worker at all:
+an algorithmic fix already took their worst frame from ~61ms to ~16ms, and they have not yet measured
+in a browser. Treat them as a design input, not a committed consumer. I already over-built once
+(SharedArrayBuffer - below); do not do it twice. Build the pool when someone will actually run it,
+and build it _general_, not tuned to terrain.
+
+## Publish the WASM kernel descriptor contract ourselves
+
+Also from their notes, and strategically the strongest idea in them: **we are currently blocked on
+proposals in someone else's repo** (tjs-lang#18 gaps 2 and 6).
+
+Instead, specify the **kernel descriptor contract** here: exports, entry names, memory layout - a
+small spec that _any_ wasm producer can satisfy (hand-written WAT, Rust, emscripten, tjs-lang). Then
+wobbly is not blocked on anyone, tjs-lang becomes the most _convenient_ producer rather than the only
+one, and the eval-free carveout is valuable beyond one language. Strictly stronger for both projects.
+
+## SharedArrayBuffer: I over-built this
+
+0.5.0 is not wrong, but it was built for a workload nobody had asked for, off the back of a 16%
+microbenchmark win. The tosijs-3d notes are blunt about why it is useless to them, and the reasoning
+generalises:
+
+- It optimises a copy a generator **does not have** - their input is four numbers.
+- **A library cannot demand COOP/COEP of its host app.** `COEP` breaks cross-origin embeds lacking
+  `CORP`. For a library that is a _bigger_ ask than `unsafe-eval`. GitHub Pages cannot set the
+  headers at all.
+
+It stays (it is real for apps that own their headers and have big numeric arrays - DSP, imaging), but
+the README now says plainly that most people, and _every_ library, should use the transfer path.
+The lesson to carry: **measure a consumer, not a microbenchmark.**
 
 ## Known gaps
 
