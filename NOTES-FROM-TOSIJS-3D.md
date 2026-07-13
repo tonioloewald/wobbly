@@ -103,6 +103,44 @@ pool.run(recipe)         // many times: → Promise<Float32Array>, transferred b
 - **Graceful degradation is mandatory.** A strict `worker-src 'self'` CSP blocks blob workers. The
   synchronous path must remain available, because our pure JS kernel stays canonical.
 
+## 5a. We are optimising the WORST CASE, not throughput. This changes the design.
+
+Read this bit twice, because a pool tuned for throughput will make our worst case _worse_, and
+every benchmark in your README is a throughput benchmark.
+
+**We don't care about tiles/sec. We care about the worst frame.** Steady state is _zero_ tiles most
+frames. Nobody perceives the mean; what people perceive is the one frame that took 60ms. A change
+that doubles average throughput while adding 10ms to the tail is, for us, a straight loss. In XR a
+dropped frame is nausea, not jank.
+
+Concretely, that means:
+
+- **The queue must be priority-ordered and DROPPABLE, not FIFO.** Tiles have a priority (near the
+  camera, ahead of travel). The tile we desperately need must not wait behind twenty tiles queued
+  three frames ago that nobody wants any more. FIFO turns a spike into a stall.
+- **Queued work must be cancellable _and_ replaceable.** After an origin reset or a fast turn, most
+  of the queue is instantly garbage. If we can't drop it, the pool spends seconds finishing work
+  nobody wants — and that _is_ the worst case.
+- **Bound the queue.** An unbounded queue is unbounded latency. Prefer to drop or replace rather
+  than accumulate.
+- **One tile per job, and give us partial results as they land.** Don't batch 24 tiles into one job
+  to amortise dispatch — that maximises throughput and maximises time-to-first-useful-tile. Your
+  `onPartial` idea is exactly right, and it's a _tail-latency_ feature, not a nicety.
+- **Warm the pool at scene start.** Worker startup is part of the worst case, and lazily spawning on
+  first burst means paying it precisely when you're already busy.
+- **Idle must be free.** Most frames need nothing. No polling, no spinning.
+- **No allocation per job.** Our worst frames are as likely to be a GC pause as compute. Preallocate,
+  ping-pong the output buffers back for reuse, produce zero garbage in the steady state. This is why
+  "no allocation" matters more to us than any copy optimisation.
+- **Predictable per-job cost.** Fixed capacity, no dynamic growth, no rehashing — nothing that has a
+  rare, expensive path.
+
+**And please report the metrics that match.** "24 tiles at 1.1ms/frame, 85% of theoretical ideal" is
+a _throughput_ result — it tells us nothing about the thing we're buying. What we need to know is:
+**what was the worst frame on the main thread, and how long until the first needed tile arrived?**
+Our own profiler deliberately reports `worstFrameMs` and `worstFrameSaturated` rather than an
+average, for exactly this reason.
+
 ## 6. Please don't over-build for us — we may not need a worker at all
 
 Honest status from our side: we found an **algorithmic** win first. The normal at each vertex was

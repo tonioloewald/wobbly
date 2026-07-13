@@ -202,6 +202,37 @@ pool.run(recipe) // many times: -> Promise<Float32Array>, transferred back
 - **Latency is the metric, not throughput.** A tile a frame late is fine; a 16ms hitch is not. In XR
   a dropped frame is nausea.
 
+### The pool must optimise the WORST case, and a throughput-tuned pool would make it worse
+
+Their §5a, and it is the single most important design constraint here. A pool tuned for tiles/sec
+will actively damage them: a change that doubles average throughput while adding 10ms to the tail is
+a straight loss. Nobody perceives the mean; they perceive the 60ms frame.
+
+Requirements that follow — note how many of these a naïve pool gets backwards:
+
+- **Priority-ordered and DROPPABLE, not FIFO.** Tiles have priority (near the camera, ahead of
+  travel). The tile you desperately need must not queue behind twenty tiles nobody wants any more.
+  **FIFO turns a spike into a stall.**
+- **Queued work must be cancellable _and_ replaceable.** After an origin reset most of the queue is
+  instantly garbage. If it can't be dropped, the pool spends seconds finishing dead work — and that
+  _is_ the worst case.
+- **Bound the queue.** An unbounded queue is unbounded latency. Drop or replace; don't accumulate.
+- **One job per tile — do NOT batch to amortise dispatch.** Batching maximises throughput and
+  maximises time-to-first-useful-result. Dispatch is only ~20µs; there is nothing to amortise.
+  `onPartial` is a **tail-latency feature**, not a nicety.
+- **No allocation per job.** Their worst frames are as likely to be a GC pause as compute.
+  Preallocate, ping-pong output buffers back for reuse, produce zero garbage in steady state. _This
+  matters more to them than any copy optimisation_ — which is another nail in the SharedArrayBuffer
+  coffin.
+- **Predictable per-job cost** — fixed capacity, no dynamic growth, no rare expensive path.
+- ✅ **Warm the pool at scene start** — done: `warmWorkerPool()`.
+- ✅ **Idle must be free** — done: no polling; waiters park on an event.
+
+**And report the metrics that match.** My "24 tiles at 1.1ms/frame, 85% of theoretical ideal" was a
+_throughput_ result and told them nothing. The honest numbers, now in the README: **worst
+main-thread block 10.09ms → 0.56ms**, first usable tile at 0.39ms. Their own profiler reports
+`worstFrameMs`, not an average, for exactly this reason.
+
 **The pool is the primitive worth exposing, and `AsyncArray` should sit on top of it.** That
 generalises to _any_ deterministic generator - the workload class where a worker unambiguously pays.
 

@@ -62,6 +62,31 @@ Shipping the table is shipping a cache of something cheaper to recompute than to
 This class of work is where a worker pays for itself unambiguously — much more reliably than "heavy
 callback over a big array," which, as the benchmarks below show, is a narrower win than it sounds.
 
+### For this workload, throughput is the wrong metric
+
+If you're generating frames, **nobody perceives your average.** They perceive the one frame that took
+60ms. So the number that matters is not tiles/sec — it's **how long the main thread was blocked**,
+and **how soon the first needed result arrived.**
+
+Generating 24 terrain tiles (10-core Mac, `onPartial` to take results as they land):
+
+|                             | serial                        | wobbly     |
+| --------------------------- | ----------------------------- | ---------- |
+| **worst main-thread block** | **10.09ms** — a dropped frame | **0.56ms** |
+| time to first usable tile   | 10.09ms (all or nothing)      | **0.39ms** |
+| wall clock, all 24 tiles    | 9.2ms                         | 2.45ms     |
+
+The bottom row is the throughput win, and it's the _least_ interesting one. The top row is the
+product: the burst stops blocking your render loop. Note also that serial has no "first tile" — you
+get everything at the end or nothing, which is why `onPartial` is a **tail-latency feature**, not a
+convenience.
+
+Two things follow, and wobbly does both:
+
+- **Warm the pool when you're idle**, with `warmWorkerPool()`. Worker startup is part of your worst
+  frame; spawning lazily means paying it during the first burst, exactly when you're already busy.
+- **Idle is free.** Workers park on an event; nothing polls or spins between bursts.
+
 ## Does this actually make things faster?
 
 **Yes — and how much depends almost entirely on whether you hand it a `TypedArray`.**

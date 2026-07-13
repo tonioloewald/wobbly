@@ -389,6 +389,19 @@ export function configureWorkerPool({ size }: { size: number }): void {
 }
 
 /**
+ * Builds the worker pool now, rather than on first use.
+ *
+ * Worker startup is **part of your worst frame**. Spawning lazily means paying
+ * it during the first burst — precisely when you are already busy. Call this at
+ * scene start, on a loading screen, any time you are idle.
+ *
+ * Idempotent, and free to call when the pool already exists.
+ */
+export function warmWorkerPool(): void {
+  getPool()
+}
+
+/**
  * Terminates every worker in the pool and forgets it; the next operation builds
  * a fresh one. Useful when tearing down a page or a test, and the only way to
  * re-`configureWorkerPool()` once the pool exists.
