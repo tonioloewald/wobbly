@@ -3,6 +3,36 @@
 All notable changes to this project are documented here, in
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
+## [0.4.0] — 2026-07-13
+
+Aimed at the **generation** workload — many independent jobs, each producing its own buffer, under a
+frame deadline (terrain tiles from a noise field; see
+[tjs-lang#18](https://github.com/tonioloewald/tjs-lang/issues/18)). Measured on that shape: 24 tiles
+that block the main thread for 9.2ms serially now take ~1.1ms per frame off-thread, and the first
+tiles are usable at 0.5ms instead of 2.4ms.
+
+### Added
+
+- **`onPartial(results, startIndex)`** — receive each worker's results as they land instead of
+  waiting for the slowest. `startIndex` locates the chunk in the input (and, for `map`, in the
+  output). The promise still resolves with everything at the end.
+
+### Fixed
+
+- **A `map` returning a TypedArray per item was cloning every one of them.** Only a single
+  top-level TypedArray result was transferred; an _array of_ TypedArrays — one heightfield per
+  tile, the whole point of the generation shape — went through structured clone. All result buffers
+  now ride the transfer list (deduped, since `postMessage` throws on a repeated buffer).
+- **The callback was re-parsed with `new Function()` on every message.** Workers are reused, and a
+  60fps caller re-sends identical source every frame, so that was ~600 redundant compiles a second.
+  Workers now cache the compiled callback and only `bind()` per message.
+- **Claiming a worker polled on a 10ms timer.** A contended caller could wait out most of a 16.7ms
+  frame budget just to _acquire_ a worker. Waiters are now woken the moment workers are released.
+  (This also fixes a latent hang: a waiter queued across `terminateWorkerPool()` held a stale pool
+  reference and would never have been satisfied.)
+
+Together these took the 24-tile batch from 2.4× to 4.0× faster than serial.
+
 ## [0.3.0] — 2026-07-13
 
 ### Added
@@ -91,6 +121,7 @@ First published release, as `wobbly-js` on npm (the bare name `wobbly` is taken)
 - Noted that floating-point addition is not truly associative, so a parallel sum is not
   bit-identical to a serial one.
 
+[0.4.0]: https://github.com/tonioloewald/wobbly/releases/tag/v0.4.0
 [0.3.0]: https://github.com/tonioloewald/wobbly/releases/tag/v0.3.0
 [0.2.0]: https://github.com/tonioloewald/wobbly/releases/tag/v0.2.0
 [0.1.0]: https://github.com/tonioloewald/wobbly/releases/tag/v0.1.0

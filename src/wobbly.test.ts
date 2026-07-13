@@ -425,6 +425,66 @@ test('an empty TypedArray filters to an empty TypedArray', async () => {
   expect(result.length).toBe(0)
 })
 
+test('a map returning TypedArrays transfers them back intact', async () => {
+  // The tile-generation shape: each item produces its own buffer (a heightfield).
+  // Those buffers must ride the transfer list, not be cloned — and they must
+  // arrive whole, in order.
+  const specs = Array.from({ length: 24 }, (_, i) => ({ seed: i }))
+
+  const tiles = await new AsyncArray(specs).map((spec: { seed: number }) => {
+    const out = new Float32Array(64)
+    for (let i = 0; i < out.length; i++) out[i] = spec.seed * 100 + i
+    return out
+  })
+
+  expect(tiles).toHaveLength(24)
+  expect(tiles[0]).toBeInstanceOf(Float32Array)
+  expect(tiles[0]!.length).toBe(64)
+  // In order, and with contents intact — a detached buffer would read as 0.
+  expect(tiles[7]![0]).toBe(700)
+  expect(tiles[23]![63]).toBe(2363)
+})
+
+test('onPartial delivers chunks before the operation finishes', async () => {
+  const specs = Array.from({ length: 24 }, (_, i) => ({ seed: i }))
+  const arrivals: Array<{ count: number; startIndex: number }> = []
+
+  const tiles = await new AsyncArray(specs)
+    .withWorkers(4)
+    .map((spec: { seed: number }) => spec.seed * 2, {
+      onPartial: (chunk: number[], startIndex: number) => {
+        arrivals.push({ count: chunk.length, startIndex })
+      },
+    })
+
+  // One delivery per worker, and together they account for everything.
+  expect(arrivals.length).toBe(4)
+  expect(arrivals.reduce((n, a) => n + a.count, 0)).toBe(24)
+  // startIndex locates the chunk in the final result.
+  for (const { startIndex } of arrivals) {
+    expect(tiles[startIndex]).toBe(startIndex * 2)
+  }
+  expect(tiles).toEqual(specs.map((s) => s.seed * 2))
+})
+
+test('contended claims are woken, not polled', async () => {
+  // Two operations that together want more than the pool: the second must be
+  // woken as soon as the first releases, not wait out a poll interval.
+  const data = Array.from({ length: 1000 }, (_, i) => i)
+
+  const t = performance.now()
+  await Promise.all([
+    new AsyncArray(data).withWorkers(8).map((n: number) => n + 1),
+    new AsyncArray(data).withWorkers(8).map((n: number) => n + 1),
+    new AsyncArray(data).withWorkers(8).map((n: number) => n + 1),
+  ])
+  const elapsed = performance.now() - t
+
+  // Trivial work on 1000 items; the old 10ms-poll claim made each contended
+  // wait cost ~10ms. This is a latency guard, not a throughput one.
+  expect(elapsed).toBeLessThan(150)
+})
+
 test('the pool survives a failed operation', async () => {
   const boom = new AsyncArray([1, 2, 3])
   await boom

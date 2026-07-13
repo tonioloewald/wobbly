@@ -39,6 +39,18 @@ export interface OperationOptions {
   /** Receives progress in the range 0…1, throttled to ~1 call per percent. */
   onProgress?: (progress: number) => void
   /**
+   * Receives each worker's results **as they land**, instead of making you wait
+   * for the whole operation. Only fires for `map` and `filter`.
+   *
+   * `startIndex` is the index, in the input, of the chunk's first item — so for
+   * a `map` it is also the offset of these results in the final array.
+   *
+   * Use it when the results are worth consuming early: uploading generated
+   * terrain tiles to the GPU as each one arrives rather than stalling a frame
+   * on the slowest, say. The promise still resolves with everything at the end.
+   */
+  onPartial?: (results: any, startIndex: number) => void
+  /**
    * Cancels the operation. The promise rejects with `signal.reason` (an
    * `AbortError` by default).
    *
@@ -137,6 +149,12 @@ interface WorkerResult<U> {
 }
 
 const workerScript = `
+  // Rebuilding the callback costs a parse. A worker is reused across dispatches
+  // — and a 60fps caller re-sends the same source every frame — so compile once
+  // and keep it. Only bind() runs per message.
+  let cachedSource;
+  let cachedFn;
+
   self.onmessage = (event) => {
     const { type, data, fn, context, workerIndex, reportProgress, into } = event.data;
 
@@ -145,7 +163,11 @@ const workerScript = `
       contextObj.final = false;
       contextObj.progress = () => {};
 
-      const callback = (new Function('return ' + fn)()).bind(contextObj);
+      if (fn !== cachedSource) {
+        cachedSource = fn;
+        cachedFn = new Function('return ' + fn)();
+      }
+      const callback = cachedFn.bind(contextObj);
 
       let processItem = callback;
       if (reportProgress) {
@@ -207,8 +229,21 @@ const workerScript = `
         default:
           throw new Error('unknown operation type: ' + type);
       }
-      const transfer = ArrayBuffer.isView(result) ? [result.buffer] : [];
-      self.postMessage({ type: 'result', result, workerIndex }, transfer);
+      // Transfer every buffer we're handing back, including a result that is an
+      // *array of* TypedArrays — e.g. map(spec => Float32Array) building one
+      // heightfield per tile. Cloning those would defeat the whole point.
+      // Deduped: postMessage throws if the same buffer appears twice.
+      const buffers = new Set();
+      const collect = (value) => {
+        if (ArrayBuffer.isView(value)) buffers.add(value.buffer);
+        else if (value instanceof ArrayBuffer) buffers.add(value);
+      };
+      collect(result);
+      if (Array.isArray(result)) result.forEach(collect);
+      self.postMessage(
+        { type: 'result', result, workerIndex },
+        [...buffers]
+      );
     } catch (e) {
       self.postMessage({
         type: 'result',
@@ -262,6 +297,8 @@ export function terminateWorkerPool(): void {
     URL.revokeObjectURL(workerUrl)
     workerUrl = undefined
   }
+  // Anyone queued must re-check against the fresh pool rather than hang.
+  wakeWaiters()
 }
 
 /**
@@ -283,22 +320,39 @@ function getPool(): Worker[] {
   return workerPool
 }
 
+/** Callers queued waiting for workers to come back to the pool. */
+const waiting: Array<() => void> = []
+
+/** Wake everyone waiting; each re-checks whether the pool can now satisfy it. */
+function wakeWaiters(): void {
+  const woken = waiting.splice(0)
+  for (const wake of woken) wake()
+}
+
 /**
  * Claims workers from the pool. By default it takes only *half* the pool, so
  * that concurrent operations can proceed in parallel instead of deadlocking
  * behind each other.
+ *
+ * Contended callers are woken the moment workers are released — not polled.
+ * A poll would add up to its own interval of latency to every claim, which is
+ * ruinous for deadline work (a 16.7ms frame budget cannot afford a 10ms sleep
+ * just to acquire a worker).
  */
 async function claimWorkers(count?: number): Promise<Worker[]> {
-  const pool = getPool()
+  getPool()
   const wanted = Math.min(count ?? Math.ceil(maxWorkers / 2), maxWorkers)
-  while (pool.length < wanted) {
-    await new Promise((resolve) => setTimeout(resolve, 10))
+  // Re-read the pool each pass: terminateWorkerPool() can swap it out from
+  // under us, and a waiter holding a stale reference would never be satisfied.
+  while (getPool().length < wanted) {
+    await new Promise<void>((resolve) => waiting.push(resolve))
   }
-  return pool.splice(0, wanted)
+  return getPool().splice(0, wanted)
 }
 
 function releaseWorkers(workers: Worker[]): void {
   getPool().push(...workers)
+  wakeWaiters()
 }
 
 /** A dead worker can't be reused — bin it and replace it with a fresh one. */
@@ -309,6 +363,7 @@ function replaceWorkers(workers: Worker[]): void {
   getPool().push(
     ...Array.from({ length: workers.length }, () => new Worker(workerUrl!))
   )
+  wakeWaiters()
 }
 
 /**
@@ -373,7 +428,7 @@ export class AsyncArray<T, C extends ArrayLike<T> = T[]> {
     fn: Function,
     options: ReduceOptions<U> & { into?: NumericArrayConstructor } = {}
   ): Promise<U[] | U | NumericArray | void> {
-    const { onProgress, combine, signal, into } = options
+    const { onProgress, onPartial, combine, signal, into } = options
     const source = this.array as unknown as
       | (T[] & { slice(a: number, b: number): T[] })
       | NumericArray
@@ -481,6 +536,13 @@ export class AsyncArray<T, C extends ArrayLike<T> = T[]> {
 
         results[workerIndex] = result
         receivedCount++
+
+        // Hand this chunk over immediately — the caller may want to start work
+        // on it rather than wait for the slowest worker.
+        if (onPartial !== undefined && (type === 'map' || type === 'filter')) {
+          onPartial(result, workerIndex * chunkSize)
+        }
+
         if (receivedCount < workers.length) return
 
         settled = true

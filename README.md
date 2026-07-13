@@ -220,6 +220,39 @@ const results = await asyncNumbers.map(expensiveFn, (progress) => {
 })
 ```
 
+## Streaming results as they land
+
+By default you wait for the slowest worker. `onPartial` hands you each worker's results the moment
+they arrive, so you can start using them:
+
+```js
+const tiles = await new AsyncArray(tileSpecs).map(buildTile, {
+  onPartial: (chunk, startIndex) => {
+    // fires ~4 times for 4 workers, first one long before the last
+    chunk.forEach((tile, i) => uploadToGpu(tile, startIndex + i))
+  },
+})
+```
+
+`startIndex` is where the chunk begins in the input — for a `map`, that's also its offset in the
+final array. The promise still resolves with everything at the end; `onPartial` is a head start,
+not a replacement.
+
+For a generation workload (24 terrain tiles from a noise field, say) this turns "nothing for 2.4ms,
+then everything" into "first tiles at 0.5ms" — the difference between filling a frame budget
+progressively and stalling on the slowest tile.
+
+If your callback builds a `TypedArray` per item, those buffers are **transferred** back rather than
+cloned, so this pattern is cheap:
+
+```js
+const heightfields = await new AsyncArray(specs).map((spec) => {
+  const out = new Float32Array(66 * 66)
+  // …fill it…
+  return out // transferred, not copied
+})
+```
+
 ## Cancellation
 
 Pass an `AbortSignal`. The promise rejects with `signal.reason`.

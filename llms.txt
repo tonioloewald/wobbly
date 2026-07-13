@@ -1,4 +1,4 @@
-# wobbly v0.3.0
+# wobbly v0.4.0
 
 Parallelize `map`, `filter`, `reduce`, and `forEach` over large arrays using Web Workers.
 No worker file to build or serve. ~2kB gzipped, zero dependencies.
@@ -88,9 +88,9 @@ import { AsyncArray } from 'wobbly-js'
 | `withContext(obj)` | a **new** `AsyncArray` binding `obj` as the callback's `this` |
 | `withWorkers(n)` | a **new** `AsyncArray` claiming `n` workers per operation |
 
-`options` is `{ onProgress?, signal? }`, plus `combine?` for `reduce` and `into?` for `map`; a bare
-function is shorthand for `{ onProgress }`. `withContext` and `withWorkers` do not mutate the
-receiver.
+`options` is `{ onProgress?, onPartial?, signal? }`, plus `combine?` for `reduce` and `into?` for
+`map`; a bare function is shorthand for `{ onProgress }`. `withContext` and `withWorkers` do not
+mutate the receiver.
 
 Module functions: `configureWorkerPool({ size })` (before first use) and `terminateWorkerPool()`.
 Types: `WobblyContext`, `WobblyCallback`, `WobblyReducer`, `WobblyCombiner`, `OperationOptions`,
@@ -118,6 +118,22 @@ The work really stops; side effects already performed inside those workers stand
 ### Errors
 
 A callback that throws in a worker **rejects** the promise; the workers are replaced.
+
+### Streaming (`onPartial`) — for generation workloads
+
+By default you wait for the slowest worker. `onPartial` gives you each worker's results as they
+land. `startIndex` is where the chunk begins in the input (= its offset in a `map`'s output).
+
+```js
+await new AsyncArray(tileSpecs).map(buildTile, {
+  onPartial: (chunk, startIndex) =>
+    chunk.forEach((tile, i) => uploadToGpu(tile, startIndex + i)),
+})
+```
+
+If a callback returns a `TypedArray` per item (one heightfield per tile, say), those buffers are
+**transferred** back, not cloned — so this shape is cheap. Measured on 24 noise tiles: 9.2ms of
+blocking main-thread work becomes ~1.1ms/frame off-thread, first tiles usable at 0.5ms.
 
 ## TypedArrays are the fast path — use one if your data is numeric
 
