@@ -2,6 +2,9 @@
 // Everything wobbly claims about CSP, blob workers, transferables and
 // SharedArrayBuffer has so far been reasoned, never observed.
 import { chromium } from 'playwright-core'
+import { KERNEL_BYTES } from './kernel-fixture.ts'
+
+const KERNEL_B64 = Buffer.from(KERNEL_BYTES).toString('base64')
 
 const DIST = await Bun.file(
   new URL('../dist/index.js', import.meta.url).pathname
@@ -66,6 +69,26 @@ await check('shared zero-copy map with out', async () => {
   return 'in-place ok, out[999]=' + outp[999]
 })
 
+// A WASM kernel is a PAYLOAD, not a closure — so it needs no eval. This proves
+// the eval-free path really is eval-free, and needs no SharedArrayBuffer.
+await check('WASM kernel (no eval, no SAB)', async () => {
+  const bytes = Uint8Array.from(atob('${KERNEL_B64}'), (c) => c.charCodeAt(0))
+  const mod = await WebAssembly.compile(bytes)
+  const src = 'self.onmessage = async (e) => {' +
+    'const i = new WebAssembly.Instance(e.data.mod);' +
+    'new Float32Array(i.exports.memory.buffer, 0, 1)[0] = 100;' +
+    'const n = i.exports.gen(0, 1024, 4);' +
+    'const out = new Float32Array(i.exports.memory.buffer, 1024, n).slice();' +
+    'self.postMessage({ out }, [out.buffer]); }'
+  const w = new Worker(URL.createObjectURL(new Blob([src], { type: 'application/javascript' })))
+  const out = await new Promise((res, rej) => {
+    w.onmessage = (e) => res(e.data.out)
+    w.onerror = () => rej(new Error('worker blocked'))
+    w.postMessage({ mod })
+  })
+  return '[' + Array.from(out).join(',') + ']'
+})
+
 window.__RESULTS__ = results
 window.__DONE__ = true
 `
@@ -84,6 +107,16 @@ const SHARED_OPS = [
   'SharedArrayBuffer constructible',
   'shared zero-copy map with out',
 ]
+const KERNEL = 'WASM kernel (no eval, no SAB)'
+// The kernel is NOT magic: a CSP that grants neither `wasm-unsafe-eval` nor
+// `unsafe-eval` blocks WebAssembly.compile() as well ("Compiling or
+// instantiating WebAssembly module violates ... 'unsafe-eval' is not an
+// allowed source"). Verified — this check caught me overclaiming.
+//
+// The real argument for KERNEL-CONTRACT.md is narrower and still decisive: the
+// kernel needs a *weaker* grant. Given `wasm-unsafe-eval` and NOTHING else, the
+// kernel runs where the JS callback is refused. And with no CSP at all, it needs
+// no grant.
 
 interface Regime {
   headers: Record<string, string>
@@ -112,9 +145,20 @@ const REGIMES: Record<string, Regime> = {
       'Content-Security-Policy': "default-src 'self'; script-src 'self'",
     },
     // The blob worker is refused before `new Function()` is ever reached, so
-    // every operation fails — but it must fail *cleanly*, naming CSP.
+    // every operation fails — but it must fail *cleanly*, naming CSP. WASM is
+    // blocked here too: with neither grant, `WebAssembly.compile` is refused.
+    blocked: [...WOBBLY_OPS, ...SHARED_OPS, KERNEL],
+    why: 'neither grant: even WebAssembly.compile is refused',
+  },
+  "CSP: 'wasm-unsafe-eval' but NO 'unsafe-eval'": {
+    headers: {
+      'Content-Security-Policy':
+        "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src blob:",
+    },
+    // The whole thesis: the JS-callback path is refused, the WASM kernel runs.
+    // No SharedArrayBuffer, no COOP/COEP, no unsafe-eval.
     blocked: [...WOBBLY_OPS, ...SHARED_OPS],
-    why: 'CSP blocks the blob worker; wobbly must reject clearly, not hang',
+    why: 'the eval-free kernel must work exactly where the JS callback cannot',
   },
   "CSP with 'unsafe-eval' + worker-src blob:": {
     headers: {

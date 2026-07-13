@@ -19,9 +19,35 @@ A **WebAssembly kernel escapes that**, because a kernel is a _payload_, not a cl
 - Instantiating WASM is **not script evaluation.** CSP gates it separately, under
   **`'wasm-unsafe-eval'`** — a far narrower grant, allowed in places that categorically refuse
   `'unsafe-eval'`.
-- `WebAssembly.Memory({ shared: true }).buffer` **is a `SharedArrayBuffer`** (verified), so where
-  cross-origin isolation exists the kernel's linear memory can _be_ wobbly's arena — no copy
-  anywhere in the system. Where it doesn't, the same kernel still works over transferred buffers.
+
+**This needs no `SharedArrayBuffer` and no cross-origin isolation.** WASM linear memory is an
+ordinary `ArrayBuffer`. The kernel writes into it; you copy the result out (a ~15KB memcpy for a
+terrain tile — nothing) and **transfer** it. That is the whole data path.
+
+**Verified in Chromium** (pinned by `bin/browser-check.ts`), on a page with no COOP/COEP, where
+`SharedArrayBuffer` does not even exist:
+
+| CSP                                                    | JS callback      | WASM kernel             |
+| ------------------------------------------------------ | ---------------- | ----------------------- |
+| none at all                                            | ✓                | ✓ (**no grant needed**) |
+| `script-src 'self' 'wasm-unsafe-eval'`                 | ✗ _violates CSP_ | **✓**                   |
+| `script-src 'self' 'unsafe-eval'` + `worker-src blob:` | ✓                | ✓                       |
+| `script-src 'self'` (neither grant)                    | ✗                | ✗                       |
+
+Be precise about the last row — the kernel is **not magic**. A CSP that grants _neither_
+`wasm-unsafe-eval` nor `unsafe-eval` refuses `WebAssembly.compile()` as well. (This check caught an
+earlier draft overclaiming.)
+
+The decisive row is the second: given `'wasm-unsafe-eval'` and **nothing else**, the kernel runs
+exactly where the JS callback is refused. So the kernel path is **strictly cheaper to deploy than
+what wobbly does today** — no server setup, a _narrower_ CSP grant, and no "your callback has no
+closure" rule. It is not an exotic top tier; it is the destination.
+
+Shared memory is an **orthogonal, optional** extra: where cross-origin isolation happens to exist,
+`WebAssembly.Memory({ shared: true }).buffer` is a `SharedArrayBuffer`, so the kernel's memory can be
+wobbly's arena and even the copy-out disappears. **Do not require it.** For a library, demanding
+COOP/COEP is a _bigger_ ask than `unsafe-eval` — it breaks cross-origin embeds and is impossible on
+GitHub Pages. The kernel must work without it, and does.
 
 **The catch:** if calling a kernel in a worker still requires shipping a JS closure to glue it
 together, we're back to `new Function()` and the entire CSP win evaporates. So a _generic_ pool must

@@ -63,18 +63,38 @@ worker. They are databases: async, transactional, disk-backed, and they structur
 That is strictly slower than `postMessage`. The idea only works when the store is _already_ the
 source of truth.
 
-### The honest tier ladder
+### The honest tier ladder (CORRECTED)
 
-The "no setup" promise erodes as you go faster, and the README should keep saying so:
+An earlier version of this table said the WASM tier required **COOP/COEP**. That was wrong, and the
+error mattered: it made the eval-free path look like the most onerous option when it is the
+**least**. I had bolted shared memory onto the kernel tier because I had just built shared memory.
+They are independent.
 
-| tier | mechanism                      | server setup  | needs `unsafe-eval`         |
-| ---- | ------------------------------ | ------------- | --------------------------- |
-| 0    | objects, structured clone      | none          | yes                         |
-| 1    | `TypedArray`, transferred      | none          | yes                         |
-| 2    | `SharedArrayBuffer`, in place  | **COOP/COEP** | yes                         |
-| 3    | WASM kernel over shared memory | **COOP/COEP** | **no** — `wasm-unsafe-eval` |
+**Verified in Chromium** (pinned by `bin/browser-check.ts`): on a page with no COOP/COEP, where
+`SharedArrayBuffer` does not exist, under `script-src 'self' 'wasm-unsafe-eval'` — a CSP that
+refuses `unsafe-eval` — the JS callback path fails and the WASM kernel runs fine.
 
-Tiers 0 and 1 are wobbly's zero-setup pitch and must stay the default. Tiers 2 and 3 are opt-in.
+Caveat, because the check caught me overclaiming: a CSP granting _neither_ `wasm-unsafe-eval` nor
+`unsafe-eval` blocks `WebAssembly.compile()` too. The kernel needs _a_ grant — just a narrower,
+more-often-given one. With **no CSP at all** it needs nothing.
+
+| tier  | mechanism                    | server setup  | CSP grant needed                  |
+| ----- | ---------------------------- | ------------- | --------------------------------- |
+| 0     | objects, structured clone    | none          | `unsafe-eval`                     |
+| 1     | `TypedArray`, transferred    | none          | `unsafe-eval`                     |
+| **2** | **WASM kernel, transferred** | **none**      | **`wasm-unsafe-eval`** — _weaker_ |
+| 3     | _optional:_ shared memory    | **COOP/COEP** | —                                 |
+
+Ordering of onerousness: **`wasm-unsafe-eval` < `unsafe-eval` << COOP/COEP.**
+
+- A CSP grant only costs you anything **if the host sets a CSP at all** — many don't.
+- COOP/COEP is not a permission, it is a change to how the whole page loads. It breaks cross-origin
+  embeds lacking CORP, GitHub Pages cannot set it, and **a library cannot demand it of its host app**.
+
+So tier 2 is **strictly better than tiers 0 and 1**: no server setup, a weaker grant, _and_ no
+"your callback has no closure" rule — the kernel _is_ the payload. It is the destination, not a
+luxury. Tier 3 is a niche optimisation for applications that own their own headers and have large
+numeric arrays; it is nobody's default and never a library's.
 
 ## Escaping — or justifying — `unsafe-eval`
 
