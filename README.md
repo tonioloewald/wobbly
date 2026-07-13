@@ -28,6 +28,8 @@ Measured on a 10-core M-series Mac (so ~5 workers — see [Worker pool](#worker-
 
 That last row is the trap. A cheap callback over a huge array is the _worst_ case for wobbly: there is no work to spread, and you pay the copying anyway. Reach for wobbly when a single pass is janking your main thread — not merely because an array is big.
 
+An operation claims half the pool by default so that concurrent operations don't block each other. If one operation is all you're running, `.withWorkers(10)` takes every core and the first row goes from 757ms to **521ms — 6.8× faster** than serial.
+
 ## Quick start
 
 ```js
@@ -168,6 +170,29 @@ const results = await asyncNumbers.map(expensiveFn, (progress) => {
 })
 ```
 
+## Cancellation
+
+Pass an `AbortSignal`. The promise rejects with `signal.reason`.
+
+```js
+const controller = new AbortController()
+
+const pending = asyncNumbers.filter(expensiveFn, { signal: controller.signal })
+cancelButton.onclick = () => controller.abort()
+
+try {
+  const results = await pending
+} catch (e) {
+  if (e.name === 'AbortError') return // user cancelled
+  throw e
+}
+```
+
+JavaScript has no preemption — you cannot politely interrupt a worker mid-loop — so aborting
+**terminates** the workers doing the work and replaces them with fresh ones. The work genuinely
+stops rather than running on in the background. Any side effects your callback already performed
+inside those workers stand.
+
 ## Errors
 
 If your callback throws inside a worker, the returned promise **rejects** with that error, and the
@@ -200,21 +225,42 @@ setup wobbly exists to avoid. That's the trade, made deliberately.
 Workers are expensive, so wobbly keeps a pool. It's created lazily on first use — importing the
 library on its own does nothing — and holds one worker per `navigator.hardwareConcurrency`.
 
-Each operation claims **half** the pool. That's deliberate: it lets two concurrent operations
-overlap rather than deadlock behind each other, at the cost of any single operation using only half
-your cores. It's also why the benchmarks above show ~5× on 10 cores rather than ~10×.
+Each operation claims **half** the pool by default. That's deliberate: it lets two concurrent
+operations overlap rather than deadlock behind each other, at the cost of any single operation
+using only half your cores. It's also why the benchmarks above show ~5× on 10 cores, not ~10×.
+
+If one operation is all you're running, take the lot — or leave headroom if you're not:
+
+```js
+await new AsyncArray(data).withWorkers(10).map(fn) // use every core
+await new AsyncArray(data, { workers: 2 }).map(fn) // stay out of the way
+```
+
+And you can size the pool itself, or tear it down:
+
+```js
+import { configureWorkerPool, terminateWorkerPool } from 'wobbly-js'
+
+configureWorkerPool({ size: 4 }) // must be before the first operation
+terminateWorkerPool() // on teardown; the next operation builds a fresh pool
+```
 
 ## API
 
-`new AsyncArray(array)` wraps an array. Every operation is `async`.
+`new AsyncArray(array, options?)` wraps an array — `options` is `{ workers? }`. Every operation is
+`async`.
 
-| Method                     | Resolves to                                                                                                                                           |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `map(fn, onProgress?)`     | a new array of results, in input order                                                                                                                |
-| `filter(fn, onProgress?)`  | the items for which `fn` returned truthy, in input order                                                                                              |
-| `reduce(fn, options?)`     | the reduced value. `options` is `{ combine?, onProgress? }`, or a bare progress callback — **[read the caveat](#reduce-read-this-before-you-use-it)** |
-| `forEach(fn, onProgress?)` | `undefined`                                                                                                                                           |
-| `withContext(obj)`         | a new `AsyncArray` binding `obj` as the callback's `this`                                                                                             |
+| Method                  | Resolves to                                                                    |
+| ----------------------- | ------------------------------------------------------------------------------ |
+| `map(fn, options?)`     | a new array of results, in input order                                         |
+| `filter(fn, options?)`  | the items for which `fn` returned truthy, in input order                       |
+| `reduce(fn, options?)`  | the reduced value — **[read the caveat](#reduce-read-this-before-you-use-it)** |
+| `forEach(fn, options?)` | `undefined`                                                                    |
+| `withContext(obj)`      | a **new** `AsyncArray` binding `obj` as the callback's `this`                  |
+| `withWorkers(n)`        | a **new** `AsyncArray` claiming `n` workers per operation                      |
+
+`options` is `{ onProgress?, signal? }` — plus `combine?` for `reduce` — or a bare function as
+shorthand for `{ onProgress }`. Neither `withContext` nor `withWorkers` mutates the receiver.
 
 TypeScript users can type the bound `this` with the exported `WobblyContext`:
 

@@ -296,6 +296,73 @@ test('a throwing callback rejects rather than hanging', async () => {
   ).rejects.toThrow('kaboom')
 })
 
+test('an aborted operation rejects with the signal reason', async () => {
+  const controller = new AbortController()
+
+  const slow = new AsyncArray(Array.from({ length: 2e6 }, (_, i) => 1e12 + i))
+  const pending = slow.filter(
+    (n: number) => {
+      for (let i = 2, s = Math.sqrt(n); i <= s; i++) {
+        if (n % i === 0) return false
+      }
+      return n > 1
+    },
+    { signal: controller.signal }
+  )
+
+  controller.abort()
+
+  expect(pending).rejects.toThrow()
+  await pending.catch((e) => {
+    expect(e.name).toBe('AbortError')
+  })
+})
+
+test('a signal already aborted rejects immediately', async () => {
+  const signal = AbortSignal.abort(new Error('nope'))
+
+  expect(
+    new AsyncArray([1, 2, 3]).map((n: number) => n * 2, { signal })
+  ).rejects.toThrow('nope')
+})
+
+test('the pool survives an abort', async () => {
+  const controller = new AbortController()
+  const pending = new AsyncArray(largeArray).map((n: number) => Math.sqrt(n), {
+    signal: controller.signal,
+  })
+  controller.abort()
+  await pending.catch(() => {})
+
+  // If aborting had leaked the terminated workers, this would hang forever.
+  expect(await asyncArray.map((n: number) => Math.sqrt(n))).toHaveLength(
+    largeArray.length
+  )
+})
+
+test('withWorkers controls how many workers an operation claims', async () => {
+  const source = Array.from({ length: 1e4 }, (_, i) => i)
+
+  // One worker => one chunk => still correct, just not parallel.
+  const single = await new AsyncArray(source)
+    .withWorkers(1)
+    .map((n: number) => n * 2)
+
+  expect(single).toEqual(source.map((n) => n * 2))
+})
+
+test('withWorkers survives withContext and vice versa', async () => {
+  const chained = new AsyncArray([1, 2, 3])
+    .withWorkers(2)
+    .withContext({ offset: 5 })
+
+  expect(
+    await chained.map(function (this: WobblyContext, n: number) {
+      return n + this.offset
+    })
+  ).toEqual([6, 7, 8])
+})
+
 test('the pool survives a failed operation', async () => {
   const boom = new AsyncArray([1, 2, 3])
   await boom

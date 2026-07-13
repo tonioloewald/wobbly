@@ -1,6 +1,6 @@
 {
   "name": "wobbly-js",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Parallelize map, filter, reduce and forEach over large arrays using Web Workers.",
   "type": "module",
   "main": "./dist/index.js",
@@ -14,7 +14,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "llms.txt"
   ],
   "keywords": [
     "web-worker",

@@ -20,8 +20,14 @@ tosijs-ui, or tosijs-schema, and has no UI, so the observant model doesn't apply
 aligned with the stack on **Bun**, **TypeScript strict**, and the house Prettier config
 (pinned to 2.8.8; single quotes, no semicolons).
 
-There is **no ESLint** and **no doc site** — for a single-class library the README is the
-documentation, and adopting `tosijs-ui/site` would mean taking a heavy devDep to render one page.
+There is **no ESLint** and **no doc site** — for a single-class library `README.md` plus `llms.txt`
+is the documentation, and adopting `tosijs-ui/site` would mean taking a heavy devDep to render one
+page.
+
+⚠️ **`llms.txt` here is hand-written, and must be hand-updated when the API changes.** This
+directly contradicts `code-quality.md`, which lists `llms.txt` under "never hand-edit generated
+files" — true everywhere else in the ecosystem, because `tosijs-ui/site` emits it. We have no site
+and therefore no generator. Edit it; just keep it in sync with the API by hand.
 
 The npm package is **`wobbly-js`**, not `wobbly` — the bare name is taken on npm by an unrelated
 react-vr package. The repo, the class, and the branding are still "wobbly".
@@ -116,5 +122,28 @@ of deadlocking behind each other — this is what the `filter should perform ope
 test exercises, and it's why a single operation gets ~5× on a 10-core machine, not ~10×.
 
 Workers outlive a dispatch, so every listener `dispatch()` adds must come back off in `cleanup()`.
-Without that, handlers accumulate on each pooled worker across operations. A worker that errors is
-terminated and replaced rather than returned to the pool.
+Without that, handlers accumulate on each pooled worker across operations. A worker that errors —
+or is aborted — is terminated and replaced rather than returned to the pool.
+
+`configureWorkerPool({ size })` sizes the pool (before first use); `terminateWorkerPool()` tears it
+down. Per-operation worker count comes from `AsyncArrayOptions.workers` / `.withWorkers(n)`.
+
+### Cancellation, and the TDZ trap inside `dispatch()`
+
+`OperationOptions.signal` aborts an operation. Since a JS hot loop can't be preempted, aborting
+**terminates** the claimed workers (via the same `fail()` path as an error) and replaces them.
+
+⚠️ **The abort check must come after every handler in the `Promise` executor is initialised.**
+`fail()` calls `cleanup()`, which closes over `onMessage`/`onError`. Aborting any earlier hits them
+in the temporal dead zone and throws `ReferenceError` instead of rejecting — which also leaks the
+claimed workers and drains the pool, so every _later_ operation hangs. This already happened once;
+the tests that caught it are `an aborted operation rejects…` and `the pool survives an abort`.
+
+Note the pool is module-global, so a leaked worker is cross-test contamination: a bug in one
+operation shows up as unrelated tests hanging or reporting zero progress. Suspect the pool.
+
+### tsconfig needs `lib: ["ESNext", "DOM"]`
+
+`bun-types` declares `AbortController`/`AbortSignal` via `UseLibDomIfAvailable` — it defers to
+`lib.dom` when present and falls back to **stubs** when it isn't. Without `DOM`, `AbortController`
+typechecks as an empty object while working fine at runtime. Don't drop `DOM` from `lib`.

@@ -3,6 +3,29 @@
 All notable changes to this project are documented here, in
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
+## [0.2.0] — 2026-07-13
+
+### Added
+
+- **Cancellation.** Every operation takes an `AbortSignal`: `map(fn, { signal })`. The promise
+  rejects with `signal.reason`. A JS hot loop can't be interrupted, so aborting terminates the
+  workers doing the work and replaces them — the work genuinely stops.
+- **Configurable worker count.** `new AsyncArray(data, { workers: 2 })` or
+  `.withWorkers(10)` — an operation still claims half the pool by default, but you can now take
+  every core or leave headroom.
+- **Pool control.** `configureWorkerPool({ size })` sizes the pool; `terminateWorkerPool()` tears
+  it down (for page/test teardown, and to re-configure).
+- All four operations now take a uniform `options` object (`{ onProgress?, signal? }`, plus
+  `combine?` for `reduce`). A bare function is still accepted as shorthand for `{ onProgress }`.
+- `llms.txt`, shipped in the package — a compact API + gotchas reference for coding agents.
+
+### Changed
+
+- `tsconfig` now includes the `DOM` lib. `bun-types` defers to `lib.dom` when present and falls
+  back to stubs when it isn't, so `AbortController` was typechecking as an empty object.
+- The `AsyncArray` constructor's second parameter is now `options`, not the internal serialized
+  context — which should never have been in the public signature.
+
 ## [0.1.0] — 2026-07-13
 
 First published release, as `wobbly-js` on npm (the bare name `wobbly` is taken).
@@ -46,4 +69,5 @@ First published release, as `wobbly-js` on npm (the bare name `wobbly` is taken)
 - Noted that floating-point addition is not truly associative, so a parallel sum is not
   bit-identical to a serial one.
 
+[0.2.0]: https://github.com/tonioloewald/wobbly/releases/tag/v0.2.0
 [0.1.0]: https://github.com/tonioloewald/wobbly/releases/tag/v0.1.0

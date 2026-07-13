@@ -82,11 +82,22 @@ Cost: the callback can no longer be an arbitrary JS closure — it has to be exp
 kernel. That's a different (narrower, faster) product than today's `AsyncArray`, so it likely wants
 to be an _additional_ path, not a replacement.
 
-## Known gaps from the pre-publish review
+## Known gaps
 
-- **Cancellation.** No `AbortSignal`. For a library whose pitch is long jobs with progress bars,
-  you cannot stop one. Biggest missing feature.
-- **Worker count is not configurable.** Hard-wired to `navigator.hardwareConcurrency`, and any one
-  operation claims exactly half. No way to say "use all of them" or "use two, I have other work."
 - **No transferables / TypedArray fast path.** Everything goes through structured clone, so peak
-  memory is ~2× and the copy dominates for cheap callbacks. See item 5 — these converge.
+  memory is ~2× and the copy dominates for cheap callbacks — it is what makes the "11× slower" row
+  in the README's table. This is the single biggest lever on performance. See item 5; they
+  converge, since a WASM kernel over a `TypedArray` is exactly the zero-copy path.
+- **`docs/` / doc site.** There isn't one, by choice — `README.md` plus a hand-maintained
+  `llms.txt` is proportionate for one class. Revisit if the API grows. Note `llms.txt` is **not**
+  generated here (the rest of the ecosystem emits it from `tosijs-ui/site`), so it has to be
+  updated by hand when the API changes.
+- **`dist/` is gitignored**, unlike tosijs-schema, which commits it. npm is unaffected
+  (`prepublishOnly` rebuilds), but `bun add tonioloewald/wobbly` straight from git yields no
+  `dist`. Add a `prepare` script if that ever matters.
+
+### Done in 0.2.0
+
+- ~~Cancellation~~ — `AbortSignal` on every operation.
+- ~~Configurable worker count~~ — `{ workers }` / `.withWorkers(n)`, plus `configureWorkerPool()`
+  and `terminateWorkerPool()`.

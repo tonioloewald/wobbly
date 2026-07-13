@@ -1,0 +1,140 @@
+# wobbly v0.2.0
+
+Parallelize `map`, `filter`, `reduce`, and `forEach` over large arrays using Web Workers.
+No worker file to build or serve. ~2kB gzipped, zero dependencies.
+
+- Source: https://github.com/tonioloewald/wobbly
+- npm: https://www.npmjs.com/package/wobbly-js (the package is `wobbly-js`; `wobbly` is taken)
+
+There is no doc site; this file and the README are the documentation. It is hand-maintained,
+not generated — if you change the API, change this too.
+
+## The two things you will get wrong
+
+### 1. Callbacks have no closure
+
+Callbacks are serialized with `Function.prototype.toString()` and rebuilt inside the worker with
+`new Function()`. They arrive with **no closure**. Referencing anything from the enclosing scope
+throws `ReferenceError` inside the worker.
+
+```js
+const offset = 3
+const helper = (n) => n * 2
+await asyncNums.map((n) => helper(n) + offset) // ✗ ReferenceError in the worker
+```
+
+Pass what the callback needs to `withContext()`; it becomes the callback's `this`. Use a
+`function`, not an arrow — arrows cannot be re-bound.
+
+```js
+function addOffset(n) {
+  return n + this.offset
+} // ✓
+await asyncNums.withContext({ offset: 3 }).map(addOffset)
+```
+
+Context must survive `JSON.stringify` (plain data only). Items must survive structured clone.
+If a callback needs a helper, inline it into the callback body.
+
+### 2. A parallel `reduce` is not a serial `reduce`
+
+The array is folded in chunks and the partials are merged, so an un-`combine`d reducer must be
+**associative**. A non-associative one returns a confidently wrong answer with no error:
+
+```js
+;[10, 1, 2, 3].reduce((a, n) => a - n) // 4
+await new AsyncArray([10, 1, 2, 3]).reduce((a, n) => a - n) // NOT 4
+```
+
+Whenever the accumulator is a different shape from the items, folding an item and merging two
+accumulators are different operations — say so with `combine`:
+
+```js
+await new AsyncArray(harvest).reduce(
+  (counts = {}, item) => {
+    counts[item.fruit] = (counts[item.fruit] || 0) + 1
+    return counts
+  },
+  {
+    combine: (a, b) => {
+      for (const [k, n] of Object.entries(b)) a[k] = (a[k] || 0) + n
+      return a
+    },
+  }
+)
+```
+
+`combine` runs on the **main thread**, so — unlike every other callback — it has a normal closure.
+There is no seed: the accumulator arrives `undefined` on the first item, so give it a default.
+Reducing an empty array throws, as `Array.reduce` does.
+
+Note floating-point addition is not truly associative, so a parallel sum is not bit-identical to
+a serial one (~1e-9 relative). Don't parallelize a reduce that must be bit-exact.
+
+## API
+
+```js
+import { AsyncArray } from 'wobbly-js'
+```
+
+`new AsyncArray(array, options?)` — `options: { workers?: number }`
+
+| Method | Resolves to |
+| --- | --- |
+| `map(fn, options?)` | new array of results, in input order |
+| `filter(fn, options?)` | matching items, in input order |
+| `reduce(fn, options?)` | the reduced value (see above) |
+| `forEach(fn, options?)` | `undefined` |
+| `withContext(obj)` | a **new** `AsyncArray` binding `obj` as the callback's `this` |
+| `withWorkers(n)` | a **new** `AsyncArray` claiming `n` workers per operation |
+
+`options` is `{ onProgress?, signal? }` (plus `combine?` for `reduce`), or a bare function as
+shorthand for `{ onProgress }`. `withContext` and `withWorkers` do not mutate the receiver.
+
+Module functions: `configureWorkerPool({ size })` (before first use) and `terminateWorkerPool()`.
+Types: `WobblyContext`, `WobblyCallback`, `WobblyReducer`, `WobblyCombiner`, `OperationOptions`,
+`ReduceOptions`, `AsyncArrayOptions`.
+
+### Progress
+
+Automatic — the callback does not cooperate. `this.progress()` still exists as a deprecated no-op.
+
+```js
+await asyncNums.map(fn, (progress) => (bar.value = progress)) // 0…1
+```
+
+### Cancellation
+
+```js
+const controller = new AbortController()
+const pending = asyncNums.filter(fn, { signal: controller.signal })
+controller.abort() // pending rejects with signal.reason (AbortError)
+```
+
+A JS hot loop cannot be interrupted, so aborting **terminates** the workers and replaces them.
+The work really stops; side effects already performed inside those workers stand.
+
+### Errors
+
+A callback that throws in a worker **rejects** the promise; the workers are replaced.
+
+## When to use it — and when not to
+
+Only worth it when per-item work is heavy enough to pay for copying the data in and out.
+Measured on 10 cores (an operation claims half the pool by default, so ~5 workers):
+
+- Primality of 100k integers near 1e12: 3562ms → 757ms (**4.7× faster**)
+- Trivial predicate over 10M random floats: 20ms → 211ms (**11× slower**)
+
+A cheap callback over a huge array is the worst case. Reach for wobbly when a pass is janking the
+main thread, not merely because an array is big.
+
+## Limits
+
+- **Needs `unsafe-eval`** (`new Function()`) and `worker-src blob:`. Will not run under a strict
+  CSP; no Chrome MV3 extensions. This is the deliberate price of having no worker file to build
+  or serve.
+- **Browser or Bun only.** Node has `worker_threads`, not the web `Worker` global.
+- `forEach` runs in a worker with no DOM and no access to main-thread state.
+- The whole array is copied (structured clone), so peak memory is roughly double. No transferables
+  or TypedArray fast path yet.
