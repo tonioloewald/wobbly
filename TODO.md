@@ -124,40 +124,45 @@ Blob today. The callback still has to cross the barrier somehow, so this only re
 if paired with item 3, 4, or 5 — a conventional worker that still does `new Function()` has bought
 nothing. Worth designing the seam now regardless, since every other item plugs into it.
 
-### 3. Move code across the barrier via the AJS VM instead of `eval`
+### 3. The AJS VM — ANSWERED. Not a callback path; it is the _agent_ path.
 
-tjs-lang ships a capability-based, fuel-metered sandbox VM (AJS). Send the callback as **AJS source
-or AST**, interpret it in the worker. No `eval`, so no `unsafe-eval` — and as a bonus the callback
-becomes sandboxed and fuel-metered rather than arbitrary code.
+**Closed.** I had this filed under the wrong problem for two days.
 
-**The open question is throughput, and it's the whole ballgame.** wobbly only wins when per-item
-work is heavy; an interpreter that is (say) 50× slower than native JS per item would erase the
-4.7–5.7× parallel speedup and then some. Benchmark AJS-in-worker against native-in-worker on the
-primality workload _before_ building anything.
+I was treating tjs-lang's AJS VM as a possible replacement for `new Function()` in the
+**data-parallel callback** path, and wrote that "the open question is throughput, and it is the whole
+ballgame." Measured it:
 
-### 4. Ride tjs-lang's **synchronous** VM (already in flight)
+|                    |                                       |
+| ------------------ | ------------------------------------- |
+| AJS VM             | **1.49M atoms/sec — 0.67µs per atom** |
+| interpretation tax | **~8× slower than native JS**         |
 
-Item 3 is blocked on this, and the blocker is dissolving on its own: the current VM is deeply async
-(`vm.ts`'s `async run(...)`), but **tjs-lang is already building a sync executor to serve type
-predicates**. We don't need to ask for one — we need it to land with a shape we can use.
+So for a `map` over an array: an 8× interpreter tax swamps the ~6× a 10-worker fan-out buys. **AJS
+callbacks would run slower than plain serial JS.** That idea is dead — stop revisiting it.
+(Consolation: same wall-clock as serial but _off the main thread_, eval-free and sandboxed — viable
+if you want responsiveness, never for throughput.)
 
-Why we need sync at all: `Array.prototype.map/filter/reduce` callbacks are **synchronous**. An
-async interpreter can't drive them without a hand-rolled item loop, and `await`-per-item across
-millions of items would be catastrophic.
+**Its real home is the agent, and that was always its design.** The class is literally called
+`AgentVM`; its tests exercise an `llmPredict` atom. For an agent doing tens of decisions per frame,
+0.67µs/atom is irrelevant, and everything else about it is exactly right:
 
-What to track (don't fix it here — see `cross-project.md`; it's another repo):
+- **An AJS program is an AST — pure data.** Structured-cloneable, transferable, storable,
+  diffable, **LLM-generatable**. The VM interprets it; there is **no `eval` anywhere** (verified: no
+  `new Function`/`eval` in `src/vm/`). So an agent needs **no `unsafe-eval`**.
+- **Fuel metering is cooperative preemption** — and it solves the exact limitation wobbly documents
+  as unsolvable in its own cancellation docs: _"a hot loop cannot be politely interrupted — JS has no
+  preemption — so aborting terminates the worker."_ You cannot kill a game master mid-thought for
+  overrunning a frame. Give it 2ms of fuel, it yields, you resume. The sim cannot stall **by
+  construction**.
+- **Capabilities** gate IO. Hand the agent exactly `fetch`/`db`/`spawnNPC` and nothing else — which
+  matters enormously when an LLM is _authoring_ the rules at runtime.
 
-- **Scope.** A type predicate is a small, pure, effect-free expression evaluated once. That is very
-  close to our callback shape, which is a good omen — but confirm the sync path isn't scoped so
-  narrowly (predicate-only AST nodes, no loops, no locals) that a real `map` body won't run in it.
-  Our callbacks are pure too, so the effect-free restriction costs us nothing.
-- **A public entry point**, not an internal used only by the type checker.
-- **Per-call throughput**, which is item 3's real question: a predicate is evaluated once, whereas
-  we'd evaluate the callback 10⁷ times. Fixed per-call overhead that is invisible in a type check
-  is the _dominant_ cost for us.
+### 4. ~~Ride tjs-lang's synchronous VM~~ — moot
 
-If any of those three don't hold, _then_ file an issue on tjs-lang and mirror it in an `UPSTREAM.md`
-here with the URL. Not before.
+The sync VM mattered only for item 3's callback path, because `Array.map` callbacks are synchronous.
+That path is dead, so this is moot. **An agent is naturally async** — it awaits the LLM, awaits the
+DB, yields between beats. The async VM is _correct_ for the use case that actually wants it. I had
+filed the VM's best property as a defect because I was looking at it through an array-shaped hole.
 
 ### 5. Send WASM across the membrane
 
