@@ -3,6 +3,28 @@
 All notable changes to this project are documented here, in
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
+## [0.5.0] — 2026-07-13
+
+### Added
+
+- **`SharedArrayBuffer` support — the zero-copy path.** Transfers still had to slice each chunk out
+  of the input and allocate somewhere for the results. Hand wobbly a TypedArray backed by a
+  `SharedArrayBuffer` and the workers read and write _your_ memory in place: nothing is copied in
+  either direction, and nothing is allocated per call. Automatic; no flag.
+- **`map(fn, { out })`** — a pre-allocated shared output array for workers to write into. This is
+  the reusable arena a render loop wants: allocate once, reuse every frame, zero allocation per
+  pass. Resolves to `out` itself.
+- **`sharedMemoryAvailable()`** — shared memory needs cross-origin isolation (COOP/COEP headers) in
+  browsers, which is server-side setup and exactly what wobbly otherwise spares you. So it is
+  strictly opt-in and everything falls back to transfers.
+
+10M `Float64`s, moderate per-item work, 10 workers: serial **313ms**, transferred **60ms**, shared
+**51ms**. On one worker with a cheap callback — where the copy dominates rather than the compute —
+the data-path saving is closer to 40%.
+
+A shared input is never transferred; that would detach the caller's own memory. `filter` still
+copies its results back, because the number of survivors isn't known in advance.
+
 ## [0.4.0] — 2026-07-13
 
 Aimed at the **generation** workload — many independent jobs, each producing its own buffer, under a
@@ -121,6 +143,7 @@ First published release, as `wobbly-js` on npm (the bare name `wobbly` is taken)
 - Noted that floating-point addition is not truly associative, so a parallel sum is not
   bit-identical to a serial one.
 
+[0.5.0]: https://github.com/tonioloewald/wobbly/releases/tag/v0.5.0
 [0.4.0]: https://github.com/tonioloewald/wobbly/releases/tag/v0.4.0
 [0.3.0]: https://github.com/tonioloewald/wobbly/releases/tag/v0.3.0
 [0.2.0]: https://github.com/tonioloewald/wobbly/releases/tag/v0.2.0

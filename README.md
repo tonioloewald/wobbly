@@ -14,6 +14,25 @@
 bun add wobbly-js   # or: npm install wobbly-js
 ```
 
+## The four data paths
+
+How your data reaches a worker decides almost everything. Cost to hand over **1M items**:
+
+| Your data                  | Mechanism                   | Cost         | Needs             |
+| -------------------------- | --------------------------- | ------------ | ----------------- |
+| Array of objects           | structured clone            | **968ms** 🐌 | nothing           |
+| `Array` of numbers         | structured clone            | 23ms         | nothing           |
+| `TypedArray`               | **transfer** (pointer move) | ~1.6ms       | nothing           |
+| `SharedArrayBuffer`-backed | **nothing — in place**      | **0ms**      | COOP/COEP headers |
+
+Objects cost about **1µs each** to clone, which is ~600× a numeric array of the same length. That
+is not a tax you can optimise away; it is what `postMessage` costs for a rich object graph.
+
+**So: wobbly is at its best on numeric data, and at its worst on big arrays of objects.** With
+objects, a 10-worker fan-out only pays off if your callback takes more than roughly **1µs per item**
+— which real work often does (parsing, regex, crypto, geometry), but a cheap field transform never
+will. If you're moving a large object graph just to do something trivial to it, you will lose.
+
 ## Does this actually make things faster?
 
 **Yes — and how much depends almost entirely on whether you hand it a `TypedArray`.**
@@ -138,6 +157,41 @@ const doubled = await new AsyncArray(data).map((n) => n * 2, {
 })
 //    ^ a Float64Array, transferred, not cloned
 ```
+
+## SharedArrayBuffer: the zero-copy path
+
+Transferring a `TypedArray` is fast, but wobbly still has to slice each chunk out of your array and
+allocate somewhere to put the results. A **shared** array removes even that: the workers read and
+write _your_ memory, in place. Nothing is copied in either direction, and nothing is allocated per
+call.
+
+Hand wobbly a TypedArray backed by a `SharedArrayBuffer` and it happens automatically:
+
+```js
+const input = new Float64Array(new SharedArrayBuffer(n * 8))
+const output = new Float64Array(new SharedArrayBuffer(n * 8))
+
+// Workers write straight into `output`. Resolves to `output` itself.
+await new AsyncArray(input).map(transform, { out: output })
+```
+
+`out` is the arena: allocate it once, reuse it every frame. That's the difference between a render
+loop that allocates 80MB per pass and one that allocates nothing.
+
+Measured on 10M `Float64`s with moderate per-item work, 10 workers: serial **313ms**, transferred
+**60ms**, shared **51ms**. The remaining copy was ~16% of the parallel time — and on a single worker
+with a cheap callback, where the copy dominates, it's closer to 40%.
+
+**The catch, and it's a real one:** in a browser, `SharedArrayBuffer` requires
+[cross-origin isolation](https://developer.mozilla.org/en-US/docs/Web/API/Window/crossOriginIsolated)
+— the `COOP` and `COEP` response headers. That is server-side setup, which is precisely what wobbly
+otherwise spares you, and it breaks some third-party embeds. So it is strictly opt-in: pass a shared
+array and you get the zero-copy path, pass anything else and you get transfers. Check with
+`sharedMemoryAvailable()`.
+
+A shared input is **never** transferred — transferring it would detach your own memory. `filter` is
+the one operation that still copies on the way back, because the number of survivors isn't known in
+advance.
 
 ## Reduce: read this before you use it
 

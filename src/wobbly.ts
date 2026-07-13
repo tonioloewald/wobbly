@@ -79,6 +79,19 @@ export interface MapOptions extends OperationOptions {
    * back from the worker rather than cloned. See `AsyncArray.map`.
    */
   into?: NumericArrayConstructor
+  /**
+   * A pre-allocated, **shared** output array for the workers to write into,
+   * in place. Requires a shared input too. Nothing is copied in either
+   * direction, and no output is allocated per call — the arena is yours and it
+   * is reusable, which is what a render loop wants.
+   *
+   * ```js
+   * const input = new Float64Array(new SharedArrayBuffer(n * 8))
+   * const output = new Float64Array(new SharedArrayBuffer(n * 8))
+   * await new AsyncArray(input).map(fn, { out: output }) // resolves to `output`
+   * ```
+   */
+  out?: NumericArray
 }
 
 export interface AsyncArrayOptions {
@@ -118,12 +131,42 @@ function isNumericArray(value: unknown): value is NumericArray {
   return ArrayBuffer.isView(value) && !(value instanceof DataView)
 }
 
+/**
+ * True when a TypedArray is backed by shared memory, in which case workers can
+ * read and write it **in place** — no slice, no transfer, no copy in either
+ * direction.
+ */
+function isShared(value: unknown): value is NumericArray {
+  return (
+    isNumericArray(value) &&
+    typeof SharedArrayBuffer !== 'undefined' &&
+    value.buffer instanceof SharedArrayBuffer
+  )
+}
+
+/**
+ * Whether shared memory is usable here at all.
+ *
+ * In a browser this needs **cross-origin isolation** (`COOP`/`COEP` response
+ * headers) — a server-side setup step, which is exactly what wobbly otherwise
+ * spares you. So it is opt-in by handing wobbly a shared array; everything
+ * falls back to transfers when it isn't available.
+ */
+export function sharedMemoryAvailable(): boolean {
+  return (
+    typeof SharedArrayBuffer !== 'undefined' &&
+    (typeof globalThis.crossOriginIsolated !== 'boolean' ||
+      globalThis.crossOriginIsolated)
+  )
+}
+
 type OperationType = 'map' | 'forEach' | 'filter' | 'reduce'
 
 /** The message sent from the main thread to a worker. */
 interface WorkerMessage<T> {
   type: OperationType
-  data: T[] | NumericArray
+  /** The chunk itself — unless `shared`, in which case the whole buffer. */
+  data: T[] | NumericArray | null
   /** The callback, serialized via `Function.prototype.toString`. */
   fn: string
   /** The `withContext` object, serialized via `JSON.stringify`. */
@@ -137,6 +180,16 @@ interface WorkerMessage<T> {
    * structured-cloned. `null` means "give me a plain array".
    */
   into: string | null
+  /**
+   * Shared-memory path. `sharedIn`/`sharedOut` are passed by *reference* — a
+   * SharedArrayBuffer isn't copied by postMessage — and the worker operates on
+   * `[lo, hi)` in place. `viewCtor` says how to view the bytes.
+   */
+  sharedIn: SharedArrayBuffer | null
+  sharedOut: SharedArrayBuffer | null
+  viewCtor: string | null
+  lo: number
+  hi: number
 }
 
 /** The message received from a worker. */
@@ -156,7 +209,10 @@ const workerScript = `
   let cachedFn;
 
   self.onmessage = (event) => {
-    const { type, data, fn, context, workerIndex, reportProgress, into } = event.data;
+    const {
+      type, data, fn, context, workerIndex, reportProgress, into,
+      sharedIn, sharedOut, viewCtor, lo, hi,
+    } = event.data;
 
     try {
       const contextObj = JSON.parse(context);
@@ -169,23 +225,77 @@ const workerScript = `
       }
       const callback = cachedFn.bind(contextObj);
 
+      // Shared path: view the caller's memory directly and work on [lo, hi).
+      // Nothing was copied to get here, and nothing is copied to get back.
+      const items = sharedIn ? new self[viewCtor](sharedIn) : data;
+      const start = sharedIn ? lo : 0;
+      const end = sharedIn ? hi : data.length;
+      const count = end - start;
+
       let processItem = callback;
       if (reportProgress) {
-        const total = data.length;
-        const reportInterval = Math.max(1, Math.floor(total / 100));
+        const reportInterval = Math.max(1, Math.floor(count / 100));
         let processed = 0;
         processItem = (...args) => {
           const result = callback(...args);
           processed++;
-          if (processed % reportInterval === 0 || processed === total) {
+          if (processed % reportInterval === 0 || processed === count) {
             self.postMessage({
               type: 'progress',
               workerIndex,
-              progress: processed / total,
+              progress: processed / count,
             });
           }
           return result;
         };
+      }
+
+      if (sharedIn) {
+        let out;
+        switch (type) {
+          case 'map': {
+            // Write results straight into the caller's shared output array —
+            // zero copy on the way back too.
+            out = sharedOut ? new self[viewCtor](sharedOut) : new Array(count);
+            for (let i = start; i < end; i++) {
+              const v = processItem(items[i], i, items);
+              if (sharedOut) out[i] = v;
+              else out[i - start] = v;
+            }
+            break;
+          }
+          case 'filter': {
+            const keep = [];
+            for (let i = start; i < end; i++) {
+              if (processItem(items[i], i, items)) keep.push(items[i]);
+            }
+            // Survivors go back in a normal (transferable) array — their count
+            // isn't known ahead of time, so they can't be written in place.
+            out = new self[viewCtor](keep.length);
+            out.set(keep);
+            break;
+          }
+          case 'reduce': {
+            let acc = undefined;
+            for (let i = start; i < end; i++) acc = processItem(acc, items[i], i, items);
+            out = acc;
+            break;
+          }
+          case 'forEach': {
+            for (let i = start; i < end; i++) processItem(items[i], i, items);
+            out = undefined;
+            break;
+          }
+          default:
+            throw new Error('unknown operation type: ' + type);
+        }
+        // A shared map writes in place, so there is nothing to send back at all.
+        const payload = type === 'map' && sharedOut ? undefined : out;
+        const xfer = ArrayBuffer.isView(payload) && !(payload.buffer instanceof SharedArrayBuffer)
+          ? [payload.buffer]
+          : [];
+        self.postMessage({ type: 'result', result: payload, workerIndex }, xfer);
+        return;
       }
 
       let result;
@@ -426,9 +536,12 @@ export class AsyncArray<T, C extends ArrayLike<T> = T[]> {
   private async dispatch<U>(
     type: OperationType,
     fn: Function,
-    options: ReduceOptions<U> & { into?: NumericArrayConstructor } = {}
+    options: ReduceOptions<U> & {
+      into?: NumericArrayConstructor
+      out?: NumericArray
+    } = {}
   ): Promise<U[] | U | NumericArray | void> {
-    const { onProgress, onPartial, combine, signal, into } = options
+    const { onProgress, onPartial, combine, signal, into, out } = options
     const source = this.array as unknown as
       | (T[] & { slice(a: number, b: number): T[] })
       | NumericArray
@@ -436,6 +549,22 @@ export class AsyncArray<T, C extends ArrayLike<T> = T[]> {
     // than structured-cloned, which is the difference between ~227ms and ~0ms
     // for 10M numbers.
     const typedInput = isNumericArray(source)
+    // Shared memory is the *no*-copy path: workers view the caller's own buffer
+    // and work in place. Nothing is copied in either direction.
+    const sharedInput = isShared(source)
+    const sharedOut = type === 'map' && isShared(out) ? out : undefined
+
+    if (out !== undefined && !sharedInput) {
+      throw new TypeError(
+        'wobbly: `out` requires a SharedArrayBuffer-backed input — without ' +
+          'shared memory there is nothing for the workers to write into'
+      )
+    }
+    if (sharedOut !== undefined && sharedOut.length < source.length) {
+      throw new RangeError(
+        `wobbly: \`out\` is too small (${sharedOut.length} < ${source.length})`
+      )
+    }
 
     signal?.throwIfAborted()
 
@@ -549,6 +678,13 @@ export class AsyncArray<T, C extends ArrayLike<T> = T[]> {
         cleanup()
         releaseWorkers(workers)
 
+        // A shared `map` wrote straight into the caller's buffer. There is
+        // nothing to gather — the answer is already in their hands.
+        if (sharedOut !== undefined) {
+          resolve(sharedOut)
+          return
+        }
+
         if (type === 'map' || type === 'filter') {
           // Typed chunks come back as TypedArrays (transferred, not cloned), so
           // they concatenate with set() into one buffer rather than flat().
@@ -601,9 +737,17 @@ export class AsyncArray<T, C extends ArrayLike<T> = T[]> {
         worker.addEventListener('message', onMessage)
         worker.addEventListener('error', onError)
 
-        // slice() on a TypedArray gives a chunk that owns its buffer, so it is
-        // ours to transfer — the caller's array is never detached.
-        const chunk = source.slice(index * chunkSize, (index + 1) * chunkSize)
+        const lo = index * chunkSize
+        const hi = Math.min(lo + chunkSize, source.length)
+
+        // Shared input: send the buffer by reference (a SharedArrayBuffer is
+        // not copied by postMessage) plus a range. No slice, no transfer, no
+        // copy — the workers read the caller's memory directly.
+        // Otherwise: slice() gives a chunk owning its own buffer, so it is ours
+        // to transfer and the caller's array is never detached.
+        const chunk = sharedInput
+          ? null
+          : source.slice(lo, (index + 1) * chunkSize)
 
         const message: WorkerMessage<T> = {
           type,
@@ -613,6 +757,11 @@ export class AsyncArray<T, C extends ArrayLike<T> = T[]> {
           workerIndex: index,
           reportProgress,
           into: into?.name ?? null,
+          sharedIn: sharedInput ? (source.buffer as SharedArrayBuffer) : null,
+          sharedOut: sharedOut ? (sharedOut.buffer as SharedArrayBuffer) : null,
+          viewCtor: sharedInput ? source.constructor.name : null,
+          lo,
+          hi,
         }
         worker.postMessage(message, isNumericArray(chunk) ? [chunk.buffer] : [])
       })
@@ -632,6 +781,10 @@ export class AsyncArray<T, C extends ArrayLike<T> = T[]> {
    * truncates. That is why it is opt-in: without `into`, a `map` over a
    * TypedArray gives you a plain array and nothing is silently truncated.
    */
+  public async map(
+    fn: WobblyCallback<T, number>,
+    options: MapOptions & { out: NumericArray }
+  ): Promise<NumericArray>
   public async map(
     fn: WobblyCallback<T, number>,
     options: MapOptions & { into: NumericArrayConstructor }

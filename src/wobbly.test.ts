@@ -485,6 +485,62 @@ test('contended claims are woken, not polled', async () => {
   expect(elapsed).toBeLessThan(150)
 })
 
+test('a SharedArrayBuffer input is operated on in place, not copied', async () => {
+  const n = 1000
+  const input = new Float64Array(new SharedArrayBuffer(n * 8))
+  for (let i = 0; i < n; i++) input[i] = i
+
+  const doubled = await new AsyncArray(input).map((x: number) => x * 2)
+
+  expect(doubled).toEqual(Array.from({ length: n }, (_, i) => i * 2))
+  // A shared buffer must never be transferred — that would detach the caller's
+  // own memory. It is still fully intact.
+  expect(input.length).toBe(n)
+  expect(input[999]).toBe(999)
+})
+
+test('map with a shared `out` writes results in place, zero copy', async () => {
+  const n = 1000
+  const input = new Float64Array(new SharedArrayBuffer(n * 8))
+  const output = new Float64Array(new SharedArrayBuffer(n * 8))
+  for (let i = 0; i < n; i++) input[i] = i
+
+  const result = await new AsyncArray(input).map((x: number) => x * 3, {
+    out: output,
+  })
+
+  // Resolves to the caller's own array — nothing was allocated or copied back.
+  expect(result).toBe(output)
+  expect(output[0]).toBe(0)
+  expect(output[500]).toBe(1500)
+  expect(output[999]).toBe(2997)
+})
+
+test('filter and reduce work over shared memory', async () => {
+  const n = 1000
+  const input = new Float64Array(new SharedArrayBuffer(n * 8))
+  for (let i = 0; i < n; i++) input[i] = i
+
+  const evens = await new AsyncArray(input).filter((x: number) => x % 2 === 0)
+  expect(evens).toBeInstanceOf(Float64Array)
+  expect(evens.length).toBe(500)
+  expect(evens[1]).toBe(2)
+
+  const sum = await new AsyncArray(input).reduce(
+    (acc: number = 0, x: number) => acc + x
+  )
+  expect(sum).toBe((999 * 1000) / 2)
+})
+
+test('`out` without a shared input is rejected, not silently ignored', async () => {
+  const plain = Float64Array.from([1, 2, 3])
+  expect(
+    new AsyncArray(plain).map((x: number) => x, {
+      out: new Float64Array(new SharedArrayBuffer(24)),
+    })
+  ).rejects.toThrow('requires a SharedArrayBuffer-backed input')
+})
+
 test('the pool survives a failed operation', async () => {
   const boom = new AsyncArray([1, 2, 3])
   await boom

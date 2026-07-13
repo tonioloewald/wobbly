@@ -1,5 +1,81 @@
 # TODO
 
+## Where this is actually going (read first)
+
+Three measurements, taken together, say something the original design didn't know:
+
+| handing 1M items to a worker          | cost      |
+| ------------------------------------- | --------- |
+| array of objects (structured clone)   | **968ms** |
+| `Array` of numbers (structured clone) | 23ms      |
+| `TypedArray` (transferred)            | 1.6ms     |
+| `SharedArrayBuffer` (in place)        | **0ms**   |
+
+**1. The non-numeric case — the one wobbly was originally _for_ — is the worst case.** An object
+costs ~1µs to clone, ~600× a number. A 10-worker fan-out over objects only wins if the callback
+exceeds ~1µs/item, and you pay it twice (in, and results out). Big array + cheap callback + objects
+is a guaranteed loss, and no amount of engineering inside wobbly changes it: that is simply what
+`postMessage` costs for an object graph.
+
+**2. The numeric case is the perfect shape for a WASM kernel** — which is also the shape that
+escapes `unsafe-eval`. These are the same insight from two directions:
+
+- `WebAssembly.Memory({ shared: true }).buffer` **is a `SharedArrayBuffer`** (verified). So a WASM
+  kernel's linear memory can _be_ wobbly's arena. The 0.5.0 shared path already accepts exactly that
+  view, so there is **no copy anywhere in the system** — not into the worker, not into the kernel.
+- A kernel is a payload, not a closure, so nothing needs `new Function()`. CSP-wise that's
+  `wasm-unsafe-eval`, not `unsafe-eval` — a far narrower grant. See item 5 and
+  [tjs-lang#18](https://github.com/tonioloewald/tjs-lang/issues/18).
+
+This is the direction with the compounding returns: **numeric + shared + WASM** removes the membrane
+cost _and_ the eval requirement at once.
+
+**3. For non-numeric data, don't move the data — move the command.** (Credit: Tonio.) The way to
+win with objects is to never marshal them. If the data's **source of truth already lives somewhere
+a worker can reach** — and workers have full `IndexedDB` access — then you dispatch a tiny command
+and the worker reads its own slice directly. The membrane is never crossed.
+
+Note the abstraction this shares with the shared-memory path: **a chunk is a range, not a payload.**
+That is already how `dispatch()` talks to a worker when the input is a `SharedArrayBuffer` (it sends
+`{lo, hi}`, not data). Generalising it gives a virtual source:
+
+```js
+new AsyncArray.fromSource({
+  length: 1_000_000,
+  // Serialized like any callback; runs IN the worker. Reads its own slice.
+  read: async (lo, hi) => idbRange('records', lo, hi),
+})
+```
+
+Then `map`/`filter`/`reduce` work unchanged, and the 968ms clone becomes zero — each worker pulls
+`[lo, hi)` from IndexedDB itself, off the main thread, and only a small result comes back. This is
+the wa-sqlite / absurd-sql pattern, generalised.
+
+**Caveat before building it:** an IndexedDB read still deserializes (structured clone from the
+stored form) — but it happens _in the worker_, and it's a read you were going to do anyway, so it
+strictly beats "main thread reads IDB, then clones everything across". Worth prototyping against a
+real dataset before committing to the API. And be honest that this is a **different product mode** —
+command dispatch over a shared store, not array parallelism — even though it reuses the same
+range-not-payload plumbing.
+
+**Do not** use IndexedDB (or `localStorage`, or the Cache API) as a _transport_ — main → store →
+worker. They are databases: async, transactional, disk-backed, and they structured-clone anyway.
+That is strictly slower than `postMessage`. The idea only works when the store is _already_ the
+source of truth.
+
+### The honest tier ladder
+
+The "no setup" promise erodes as you go faster, and the README should keep saying so:
+
+| tier | mechanism                      | server setup  | needs `unsafe-eval`         |
+| ---- | ------------------------------ | ------------- | --------------------------- |
+| 0    | objects, structured clone      | none          | yes                         |
+| 1    | `TypedArray`, transferred      | none          | yes                         |
+| 2    | `SharedArrayBuffer`, in place  | **COOP/COEP** | yes                         |
+| 3    | WASM kernel over shared memory | **COOP/COEP** | **no** — `wasm-unsafe-eval` |
+
+Tiers 0 and 1 are wobbly's zero-setup pitch and must stay the default. Tiers 2 and 3 are opt-in.
+
 ## Escaping — or justifying — `unsafe-eval`
 
 wobbly's whole value is that you don't have to set up, bundle, and serve a worker file. The price
@@ -114,10 +190,12 @@ to be an _additional_ path, not a replacement.
   an _init-once_ per-worker context — send it when the worker is claimed (or hash it and skip the
   resend when unchanged), not with every chunk.
 - **A dispatch is a barrier, not a queue.** Each `map` claims workers, fans out, and gives them
-  back. A steady 60fps stream of small jobs pays that setup every frame, which is why 24 small
-  tiles scale ~4×, not ~10× — fixed per-dispatch cost dominates when the work per chunk is ~1ms.
-  A persistent job queue (submit tiles, workers pull) would suit a render loop better than
-  batch-per-frame. Only worth building if the demo actually wants it — `onPartial` may be enough.
+  back. A persistent job queue (submit tiles, workers pull) might suit a render loop better than
+  batch-per-frame. **But measure before building it:** a `postMessage` round-trip is only ~20µs, so
+  the dispatch envelope is _not_ the bottleneck — an earlier version of this file claimed it was,
+  and that was wrong. 24 tiles at 1.1ms/frame against a 0.92ms theoretical floor (9.2ms serial ÷ 10
+  workers) is already ~85% of ideal. There is very little left to win here; `onPartial` probably
+  closes the gap that mattered.
 
 ## Known gaps
 
