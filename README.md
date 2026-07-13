@@ -14,6 +14,13 @@
 bun add wobbly-js   # or: npm install wobbly-js
 ```
 
+> **Before you use this, read [SHOULD-YOU-USE-A-WORKER.md](./SHOULD-YOU-USE-A-WORKER.md).** It is
+> written to talk you _out_ of it. Most work that looks like it needs threads needs a better
+> algorithm instead — the project this was built for got a **4.3× win by fixing their maths** and
+> then didn't need a worker at all. And the membrane means objects are usually a **loss**. wobbly
+> wins on numeric data, generators, and genuinely heavy per-item work. Measured, with the losses
+> shown.
+
 ## The four data paths
 
 How your data reaches a worker decides almost everything. Cost to hand over **1M items**:
