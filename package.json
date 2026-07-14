@@ -48,6 +48,7 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "test:browser": "bun bin/browser-check.ts",
+    "demo:gm": "bun bin/gm-demo.ts",
     "format": "prettier --write .",
     "pack": "bun test && bun run typecheck && bun build index.ts worker.ts --sourcemap=linked --minify --outdir=dist && bunx tsc index.ts worker.ts --declaration --emitDeclarationOnly --outDir dist --target esnext --module esnext --moduleResolution bundler --skipLibCheck && bun run show-size",
     "show-size": "gzip -9 -k dist/index.js && ls -lh dist/index.js.gz && rm dist/index.js.gz",

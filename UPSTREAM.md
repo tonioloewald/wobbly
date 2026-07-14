@@ -6,6 +6,29 @@ never sees this file — it's a note to ourselves, and every entry must point at
 
 ## tjs-lang
 
+### AgentVM bundles the transpiler — NOT YET FILED (needs Tonio's go-ahead)
+
+Draft ready: [`UPSTREAM-DRAFT-tjs-vm-size.md`](./UPSTREAM-DRAFT-tjs-vm-size.md).
+
+`src/vm/vm.ts` statically imports `transpile` from `../lang/core`, which drags in the parser
+(acorn). But `transpile` is **only called when `run()` is handed a string** — pass an AST and it is
+never invoked. Measured with `bun build --minify --target=browser`:
+
+| entry                                       | gzipped     |
+| ------------------------------------------- | ----------- |
+| `src/vm/runtime.ts` (executor only)         | **13.2 KB** |
+| `src/vm/index.ts` (drags in the transpiler) | **75.9 KB** |
+
+**~62KB gzipped — nearly 6× — for a parser an AST-executing consumer never calls.** (The file's own
+header claims "Lightweight (~33KB)".)
+
+**Why we care:** the virtual-game-master case loads the VM **from a CDN into a worker**, and the
+agent is a pre-built AST — we only ever _execute_. Suggested fix: make the transpile branch a dynamic
+`await import('../lang/core')` (`run()` is already async, so it costs nothing and splits
+automatically), or publish an executor-only entry.
+
+**Not blocking.** The full stack works today — see `bun run demo:gm`.
+
 ### [#18 — WASM: make kernels thread-agnostic (worker-ready)](https://github.com/tonioloewald/tjs-lang/issues/18) — OPEN
 
 **Why we care:** it proposes the layering where tjs-lang emits an eval-free WASM kernel and
